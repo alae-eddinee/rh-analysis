@@ -147,9 +147,13 @@ def analyze_record_from_csv(row):
 def calculate_business_days_in_range(start_date, end_date):
     current = start_date
     business_days = 0
+    saturdays = 0
     while current <= end_date:
         wd = current.weekday()
-        if wd != 6:  # Exclude Sunday
+        if wd == 5:  # Saturday
+            business_days += 0.5
+            saturdays += 1
+        elif wd != 6:  # Exclude Sunday, count weekdays as 1
             business_days += 1
         current += timedelta(days=1)
     return business_days
@@ -384,35 +388,33 @@ def process_monthly_analysis_from_csv(csv_dir, output_dir):
         'IS HALF DAY': 'HALF DAYS'
     }, inplace=True)
 
-    # Calculate total expected working days (including Saturdays as 0.5 days each)
-    # Exclude both Saturdays AND Sundays from weekday records
-    weekday_records = df[~df['day_str'].str.startswith('Sa', na=False) & ~df['day_str'].str.startswith('Di', na=False)]
-    expected_weekdays = len(weekday_records['day_numeric'].unique())
+    # Calculate total expected working days using the corrected business days calculation
+    # global_expected_days now correctly includes Saturday 0.5 weighting
+    report['real working days'] = global_expected_days
     
-    # Get Saturday records for expected days calculation
-    saturday_records = df[df['day_str'].str.startswith('Sa', na=False)]
-    expected_saturdays = len(saturday_records['day_numeric'].unique())
+    # Calculate absence by counting actual absent weekdays (excluding Sundays)
+    # Weekday absences count as 1.0, Saturday absences count as 0.5
+    weekday_absences = df[(df['hours_worked'] == 0) & (~df['day_str'].str.startswith('Sa', na=False)) & (~df['day_str'].str.startswith('Di', na=False))].groupby('name').size().reset_index(name='weekday_absences')
+    saturday_absences = df[(df['hours_worked'] == 0) & (df['day_str'].str.startswith('Sa', na=False))].groupby('name').size().reset_index(name='saturday_absences')
     
-    # Calculate real working days with Saturday 0.5 adjustment (Sundays excluded completely)
-    total_expected_days_adjusted = expected_weekdays + (expected_saturdays * 0.5)
+    # Calculate half days (excluding Sundays) - use the calculated IS HALF DAY column
+    half_days = df[(df['IS HALF DAY'] == 1) & (~df['day_str'].str.startswith('Di', na=False))].groupby('name').size().reset_index(name='half_days_count')
     
-    report['real working days'] = total_expected_days_adjusted
+    # Merge absence data back to report
+    report = report.merge(weekday_absences, left_on='Employee name', right_on='name', how='left')
+    report = report.merge(saturday_absences, left_on='Employee name', right_on='name', how='left')
+    report = report.merge(half_days, left_on='Employee name', right_on='name', how='left')
+    report['weekday_absences'] = report['weekday_absences'].fillna(0)
+    report['saturday_absences'] = report['saturday_absences'].fillna(0)
+    report['half_days_count'] = report['half_days_count'].fillna(0)
+    report.drop(['name_x', 'name_y', 'name'], axis=1, inplace=True, errors='ignore')
     
-    # Calculate absence with Saturday adjustment
-    saturday_work_by_employee = saturday_records[saturday_records['is_day_worked'] == 1].groupby('name').size().reset_index(name='saturdays_worked')
-    saturday_work_by_employee['saturdays_worked'] = saturday_work_by_employee['saturdays_worked'].apply(lambda x: 1 if x > 0 else 0)
+    # Calculate final absence with proper weighting
+    # ABSENCE = weekday absences (1.0 each) + saturday absences (0.5 each) + half days (0.5 each, excluding Sundays)
+    report['ABSENCE'] = report['weekday_absences'] + (report['saturday_absences'] * 0.5) + (report['half_days_count'] * 0.5)
     
-    # Merge Saturday work data back to report
-    report = report.merge(saturday_work_by_employee, left_on='Employee name', right_on='name', how='left')
-    report['saturdays_worked'] = report['saturdays_worked'].fillna(0)
-    report.drop('name', axis=1, inplace=True)
-    
-    # Calculate adjusted absence - simplified formula with half day adjustment
-    # ABSENCE = real working days - days worked + (HALF DAYS * 0.5)
-    report['ABSENCE'] = report['real working days'] - report['days worked'] + (report['HALF DAYS'] * 0.5)
-    
-    # Clean up temporary columns (only drop saturdays_worked since it's the only one that exists)
-    report.drop(['saturdays_worked'], axis=1, inplace=True)
+    # Clean up temporary columns
+    report.drop(['weekday_absences', 'saturday_absences', 'half_days_count'], axis=1, inplace=True)
     
     report['avg_lunch_raw'] = report.apply(
         lambda x: x['daily_lunch_minutes'] / x['has_lunch_break'] if x['has_lunch_break'] > 0 else (x['daily_lunch_minutes'] if x['daily_lunch_minutes'] > 0 else 0), axis=1
