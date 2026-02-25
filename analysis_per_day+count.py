@@ -534,9 +534,15 @@ def process_daily_analysis(input_dir, output_dir):
 
     sample_day_str = daily_df.iloc[0]['day_str'] if not daily_df.empty else ""
     is_target_saturday = str(sample_day_str).startswith('Sa')
-
+    is_target_ramadan = is_ramadan_date(daily_df.iloc[0]['full_date']) if not daily_df.empty else False
+    
     # --- PRÉPARER LES LISTES DE SORTIE ---
-    under_header = "Moins de 4h" if is_target_saturday else "Moins de 8h"
+    if is_target_saturday:
+        under_header = "Moins de 4h"
+    elif is_target_ramadan:
+        under_header = "Moins de 7h"
+    else:
+        under_header = "Moins de 8h"
     df_under = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_under_hours', under_header)
 
     df_late_10 = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_late_1000', "Entrée > 10:00")
