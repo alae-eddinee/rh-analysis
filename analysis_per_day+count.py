@@ -153,6 +153,23 @@ def extract_month_year_from_filename(file_path):
     # Valeur par défaut
     return '12', year
 
+def is_ramadan_date(date_obj):
+    """Check if a date falls within Ramadan period (Feb 19, 2026 to Mar 20, 2026)."""
+    if date_obj is None:
+        return False
+    ramadan_start = datetime(2026, 2, 19)
+    ramadan_end = datetime(2026, 3, 20)
+    return ramadan_start <= date_obj <= ramadan_end
+
+def extract_date_from_string(date_str):
+    match = re.search(r'(\d{2})/(\d{2})/(\d{4})', str(date_str))
+    if match:
+        try:
+            return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+        except:
+            return None
+    return None
+
 def extract_daily_data(file_path):
     """Extrait les données, met en mémoire tampon par employé pour vérifier le statut "Ouvrier" via la colonne HJ."""
     all_records = []
@@ -209,6 +226,15 @@ def extract_daily_data(file_path):
                     day_match = re.search(r'\d+', val_0)
                     day_num = int(day_match.group()) if day_match else 0
                     day_str = parts[0] if parts else ''
+                    
+                    # Extract full date for Ramadan detection
+                    full_date = extract_date_from_string(val_0)
+                    if full_date is None:
+                        # Construct date from month/year in filename
+                        try:
+                            full_date = datetime(int(year_num), int(month_num), day_num)
+                        except:
+                            full_date = None
 
                     record = {
                         'source_file': source_file_name,
@@ -216,6 +242,7 @@ def extract_daily_data(file_path):
                         'day_raw': parts[0] if parts else '',
                         'day_numeric': day_num,
                         'day_str': day_str,
+                        'full_date': full_date,
                         'hj_code': str(hj_val).strip(),
                         'scan_count': calculated_count,
                         'raw_pointages': str(raw_scan_val) if raw_scan_val else '',
@@ -236,6 +263,9 @@ def extract_daily_data(file_path):
 def analyze_row(row):
     """Calcule les indicateurs pour retard, pas de déjeuner, heures et demi-journée."""
     scans = re.findall(r'\d{1,2}:\d{2}', str(row.get('raw_pointages', '')))
+    
+    # Check if Ramadan period
+    is_ramadan = is_ramadan_date(row.get('full_date'))
     
     # Initialiser les valeurs par défaut
     late_930 = False
@@ -285,8 +315,10 @@ def analyze_row(row):
         late_930 = True
 
     # --- VÉRIFICATION PAS DE DÉJEUNER ---
-    # Si début d'après-midi, Pas de Déjeuner n'est pas applicable/déjà signalé par Retard 14h
-    if late_1400:
+    # During Ramadan, no lunch check - always False
+    if is_ramadan:
+        no_lunch = False
+    elif late_1400:
         no_lunch = False
     else:
         no_lunch = len(scans) < 4 and len(scans) > 0
@@ -295,6 +327,7 @@ def analyze_row(row):
     # Règles : 
     # 1. Pas Samedi.
     # 2. Entrée >= 13:00 (Après-midi Seulement) OU (Sortie <= 14:00 ET Heures < 7) (Matin Seulement)
+    # During Ramadan: Use 6.5h threshold instead of 7h for morning-only check
     
     day_str = str(row.get('day_str', '')).lower()
     is_saturday = day_str.startswith('sa')
@@ -308,14 +341,15 @@ def analyze_row(row):
             t_last += timedelta(days=1)
             
         limit_1300 = t_first.replace(hour=13, minute=0, second=0)
-        # Redéfinir limit_1400 basé sur t_first pour la cohérence du type d'objet, bien que les heures comptent le plus
         limit_1400_exit = t_first.replace(hour=14, minute=0, second=0)
         
         # Condition A : Entré >= 13:00 (Quart d'après-midi / Retard)
         cond_afternoon = (t_first >= limit_1300)
         
-        # Condition B : Parti <= 14:00 (Quart de matin / Départ anticipé) ET Heures < 7
-        cond_morning = (t_last <= limit_1400_exit) and (hours_worked < 7.0)
+        # Condition B : Parti <= 14:00 (Quart de matin / Départ anticipé) ET Heures < threshold
+        # During Ramadan: threshold is 6.5h (since target is 7h), otherwise 7h (since target is 8h)
+        hours_threshold = 6.5 if is_ramadan else 7.0
+        cond_morning = (t_last <= limit_1400_exit) and (hours_worked < hours_threshold)
         
         if cond_afternoon or cond_morning:
             is_half_day = True
@@ -467,7 +501,7 @@ def process_daily_analysis(input_dir, output_dir):
         mask_saturday = df['day_str'].astype(str).str.startswith('Sa')
         df.loc[mask_saturday, 'no_lunch'] = False
 
-    df['target_hours'] = df['day_str'].apply(lambda x: 4.0 if str(x).startswith('Sa') else 8.0)
+    df['target_hours'] = df.apply(lambda x: 4.0 if str(x['day_str']).startswith('Sa') else (7.0 if is_ramadan_date(x.get('full_date')) else 8.0), axis=1)
     df['is_under_hours'] = (df['scan_count'] > 0) & (df['hours_worked'] < df['target_hours'])
 
     # --- GÉNÉRATION DES STATISTIQUES ---
@@ -518,6 +552,16 @@ def process_daily_analysis(input_dir, output_dir):
         df_no_lunch = create_category_dataframe(daily_df[~daily_df['is_half_day']], monthly_stats, monthly_stats_saturday, 'no_lunch', "Pas de Déjeuner")
         main_list = pd.concat([df_under, df_half_day, df_no_lunch, df_late_10, df_late_930, df_late_1400, df_absent], axis=1)
 
+    # Check if any day in the period falls within Ramadan
+    has_ramadan = any(is_ramadan_date(d) for d in df['full_date'] if pd.notna(d))
+    ramadan_start_day = None
+    ramadan_end_day = None
+    if has_ramadan:
+        ramadan_dates = [d for d in df['full_date'] if pd.notna(d) and is_ramadan_date(d)]
+        if ramadan_dates:
+            ramadan_start_day = min(ramadan_dates)
+            ramadan_end_day = max(ramadan_dates)
+    
     # --- EXPORTER VERS EXCEL ---
     # Calculer la plage de jours analysés
     if not df.empty and 'day_numeric' in df.columns:
@@ -531,7 +575,11 @@ def process_daily_analysis(input_dir, output_dir):
         # Créer un nom de fichier dynamique basé sur la période analysée
         dynamic_filename = f"POINTAGE ANALYSE DU {real_start_day:02d}-{month_num}-{year_num} A {real_end_day:02d}-{month_num}-{year_num}.xlsx"
         output_path = os.path.join(output_dir, dynamic_filename)
+        
+        # Build header text with Ramadan indication
         header_text = f"Analyse Quotidienne - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
+        if has_ramadan and ramadan_start_day:
+            header_text += f" (RAMADAN: 7h/jour, pas de déjeuner du {ramadan_start_day.day} Février au {ramadan_end_day.day} Mars)"
     else:
         header_text = "Analyse Quotidienne - Période non spécifiée"
         output_path = os.path.join(output_dir, NOM_FICHIER_SORTIE)

@@ -182,6 +182,14 @@ def extract_date_from_string(date_str):
             return None
     return None
 
+def is_ramadan_date(date_obj):
+    """Check if a date falls within Ramadan period (Feb 19, 2026 to Mar 20, 2026)."""
+    if date_obj is None:
+        return False
+    ramadan_start = datetime(2026, 2, 19)
+    ramadan_end = datetime(2026, 3, 20)
+    return ramadan_start <= date_obj <= ramadan_end
+
 def extract_data(file_path):
     all_records = []
     current_employee = {'service': '', 'name': '', 'matricule': '', 'records': []}
@@ -223,6 +231,7 @@ def extract_data(file_path):
                 
                 is_leave = 0
                 is_holiday = 0
+                is_unjustified_absence = 0
                 is_day_worked = 0
                 hours_worked = 0.0
                 daily_target_for_worked_day = 0.0 
@@ -232,7 +241,7 @@ def extract_data(file_path):
                 scan_count = 0
 
                 is_saturday = val_0.lower().startswith('sa')
-                is_sunday = val_0.lower().startswith('di')
+                is_ramadan = is_ramadan_date(date_obj)
 
                 if "JOUR FERIE" in row_text_upper:
                     is_holiday = 1
@@ -240,7 +249,7 @@ def extract_data(file_path):
                 elif "CONGE" in row_text_upper:
                     is_leave = 1
                 elif "ABSENCE NON JUSTIFIÉE-" in row_text_upper:
-                    pass 
+                    is_unjustified_absence = 1 
                 else:
                     times_list, scan_count = parse_scan_times(raw_scan_val)
                     hours_worked = calculate_hours_from_scans(times_list)
@@ -253,6 +262,8 @@ def extract_data(file_path):
                         is_day_worked = 1
                         if is_saturday:
                             daily_target_for_worked_day = 4.0
+                        elif is_ramadan:
+                            daily_target_for_worked_day = 7.0
                         else:
                             daily_target_for_worked_day = 8.0
 
@@ -272,6 +283,7 @@ def extract_data(file_path):
                         'is_day_worked': is_day_worked,
                         'is_leave': is_leave,
                         'is_holiday': is_holiday,
+                        'is_unjustified_absence': is_unjustified_absence,
                         'scan_count': scan_count,
                         'daily_target_for_worked_day': daily_target_for_worked_day,
                         'daily_lunch_minutes': daily_lunch_minutes,
@@ -307,6 +319,9 @@ def analyze_record(row):
     if not times: 
         return 0, 0, 0, 0, 0, 0
 
+    # Check if Ramadan period
+    is_ramadan = is_ramadan_date(row.get('full_date'))
+
     first_scan = datetime.strptime(times[0], '%H:%M')
     
     # --- TIME LIMITS ---
@@ -331,20 +346,26 @@ def analyze_record(row):
 
     is_saturday = str(row['day_str']).startswith('Sa')
     
-    if is_late_1400:
+    # --- NO LUNCH LOGIC ---
+    # During Ramadan, no lunch check - always 0
+    if is_ramadan:
+        no_lunch = 0
+    elif is_late_1400:
         no_lunch = 0
     else:
         no_lunch = 1 if (len(times) < 4 and not is_saturday) else 0
 
-    target = 4.0 if is_saturday else 8.0
+    # --- TARGET HOURS ---
+    # During Ramadan: 7h for weekdays, 4h for Saturdays
+    if is_saturday:
+        target = 4.0
+    else:
+        target = 7.0 if is_ramadan else 8.0
+    
     is_under = 1 if row['hours_worked'] > 0 and row['hours_worked'] < target else 0
 
     # --- HALF DAY LOGIC (REVISED) ---
-    # Logic:
-    # 1. NOT SATURDAY.
-    # 2. Arrived >= 13:00 (Late Entry / Afternoon Only).
-    #    OR
-    # 3. Left <= 14:00 (Early Exit / Morning Only) AND Hours < 7 (To exclude continuous 7am-2pm shifts).
+    # During Ramadan: threshold is 6.5h (since target is 7h), otherwise 7h (since target is 8h)
     
     if row['is_day_worked'] and not is_saturday and len(times) >= 2:
         try:
@@ -353,12 +374,11 @@ def analyze_record(row):
             if t_exit < t_entry: t_exit += timedelta(days=1)
             
             # --- Condition A: Afternoon Only (Entered after 13:00) ---
-            # Using 13:00 ensures we catch the 14:00 people too.
             cond_afternoon = (t_entry >= limit_1300)
             
             # --- Condition B: Morning Only (Left before 14:00) ---
-            # Added hours check < 7 to ensure it's not a full continuous day
-            cond_morning = (t_exit <= limit_1400) and (row['hours_worked'] < 7.0)
+            hours_threshold = 6.5 if is_ramadan else 7.0
+            cond_morning = (t_exit <= limit_1400) and (row['hours_worked'] < hours_threshold)
             
             if cond_afternoon or cond_morning:
                 is_half_day = 1
@@ -377,6 +397,19 @@ def calculate_business_days_in_range(start_date, end_date):
             business_days += 1
         current += timedelta(days=1)
     return business_days
+
+def calculate_weighted_business_days_in_range(start_date, end_date):
+    """Calculate weighted business days: weekdays = 1.0, Saturdays = 0.5"""
+    current = start_date
+    weighted_days = 0
+    while current <= end_date:
+        wd = current.weekday()
+        if wd == 5:  # Saturday
+            weighted_days += 0.5
+        elif wd != 6:  # Monday-Friday (not Sunday)
+            weighted_days += 1.0
+        current += timedelta(days=1)
+    return weighted_days
 
 def minutes_to_hhmm(mins):
     if pd.isna(mins) or mins == 0:
@@ -557,187 +590,269 @@ def process_monthly_analysis(input_dir, output_dir):
     df['UNDER 8H'] = [x[4] for x in metrics]
     df['IS HALF DAY'] = [x[5] for x in metrics]
 
-    report = df.groupby('name').agg({
-        'is_day_worked': 'sum',
-        'is_leave': 'sum',
-        'is_holiday': 'sum',
-        'daily_target_for_worked_day': 'sum', 
-        'ENTRY > 10H': 'sum',
-        'ENTRY > 14H': 'sum', 
-        'ENTRY > 9H30': 'sum',
-        'NO LUNCH': 'sum',
-        'UNDER 8H': 'sum',
-        'IS HALF DAY': 'sum',
-        'hours_worked': 'sum',
-        'daily_lunch_minutes': 'sum',
-        'has_lunch_break': 'sum'
-    }).reset_index()
+    # Split data into Ramadan and Normal days
+    df['is_ramadan'] = df['full_date'].apply(is_ramadan_date)
+    ramadan_df = df[df['is_ramadan'] == True].copy()
+    normal_df = df[df['is_ramadan'] == False].copy()
+    has_ramadan_data = len(ramadan_df) > 0
+    has_normal_data = len(normal_df) > 0
 
-    report.rename(columns={
-        'name': 'Employee name',
-        'is_day_worked': 'days worked',
-        'daily_target_for_worked_day': 'TOTAL HOURS NEEDED', 
-        'hours_worked': 'TOTAL HOURS WORKED',
-        'IS HALF DAY': 'HALF DAYS' # Single numeric column
-    }, inplace=True)
+    # Calculate date ranges and working days for each table
+    normal_date_range = None
+    ramadan_date_range = None
+    normal_working_days = 0
+    ramadan_working_days = 0
+    
+    if has_normal_data:
+        normal_min_date = normal_df['full_date'].min()
+        normal_max_date = normal_df['full_date'].max()
+        normal_working_days = calculate_weighted_business_days_in_range(normal_min_date, normal_max_date)
+        normal_date_range = (normal_min_date, normal_max_date)
+        print(f"DEBUG: Normal table date range: {normal_min_date} to {normal_max_date}")
+        print(f"DEBUG: Normal table weighted working days: {normal_working_days}")
+    
+    if has_ramadan_data:
+        ramadan_min_date = ramadan_df['full_date'].min()
+        ramadan_max_date = ramadan_df['full_date'].max()
+        ramadan_working_days = calculate_weighted_business_days_in_range(ramadan_min_date, ramadan_max_date)
+        ramadan_date_range = (ramadan_min_date, ramadan_max_date)
+        print(f"DEBUG: Ramadan table date range: {ramadan_min_date} to {ramadan_max_date}")
+        print(f"DEBUG: Ramadan table weighted working days: {ramadan_working_days}")
 
-    # Calculate Saturday-specific metrics for proper absence calculation
-    saturday_records = df[df['day_str'].str.startswith('Sa', na=False)]
-    expected_saturdays = len(saturday_records['day_numeric'].unique())
-    worked_saturdays = saturday_records[saturday_records['is_day_worked'] == 1]['name'].nunique() if not saturday_records.empty else 0
-    
-    # Calculate total expected working days (including Saturdays as 0.5 days each)
-    # Weekdays count as 1 day, Saturdays count as 0.5 days
-    weekday_records = df[~df['day_str'].str.startswith('Sa', na=False)]
-    expected_weekdays = len(weekday_records['day_numeric'].unique())
-    total_expected_days_adjusted = expected_weekdays + (expected_saturdays * 0.5)
-    
-    report['real working days'] = global_expected_days - report['is_leave'] - report['is_holiday']
-    
-    # Calculate absence with Saturday adjustment
-    # Get each employee's Saturday work status
-    saturday_work_by_employee = saturday_records[saturday_records['is_day_worked'] == 1].groupby('name').size().reset_index(name='saturdays_worked')
-    saturday_work_by_employee['saturdays_worked'] = saturday_work_by_employee['saturdays_worked'].apply(lambda x: 1 if x > 0 else 0)
-    
-    # Merge Saturday work data back to report
-    report = report.merge(saturday_work_by_employee, left_on='Employee name', right_on='name', how='left')
-    report['saturdays_worked'] = report['saturdays_worked'].fillna(0)
-    report.drop('name', axis=1, inplace=True)
-    
-    # Calculate adjusted absence
-    # For each employee: (weekdays_absence * 1) + (saturdays_absence * 0.5)
-    report['saturdays_absent'] = expected_saturdays - report['saturdays_worked']
-    report['weekdays_absent'] = report['real working days'] - report['saturdays_absent'] - report['days worked']
-    report['ABSENCE'] = report['weekdays_absent'] + (report['saturdays_absent'] * 0.5)
-    report['ABSENCE'] = report['ABSENCE'].apply(lambda x: max(0, x))
-    
-    # Clean up temporary columns
-    report.drop(['saturdays_worked', 'saturdays_absent', 'weekdays_absent'], axis=1, inplace=True)
-    
-    report['avg_lunch_raw'] = report.apply(
-        lambda x: x['daily_lunch_minutes'] / x['has_lunch_break'] if x['has_lunch_break'] > 0 else (x['daily_lunch_minutes'] if x['daily_lunch_minutes'] > 0 else 0), axis=1
-    )
-    report['AVG LUNCH TIME'] = report['avg_lunch_raw'].apply(minutes_to_hhmm)
+    # Function to generate report from a dataframe subset
+    def generate_report_from_df(subset_df, table_expected_days, is_ramadan_table=False):
+        if subset_df.empty:
+            return None, None
+        
+        # Calculate weighted days worked: weekdays = 1.0, Saturdays = 0.5
+        def calc_weighted_days_worked(group):
+            weekdays = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
+            saturdays = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
+            # Count unique days for each
+            weekday_days = len(weekdays['day_numeric'].unique())
+            saturday_days = len(saturdays['day_numeric'].unique())
+            return weekday_days + (saturday_days * 0.5)
+        
+        # Calculate weighted absence: weekday absences = 1.0, Saturday absences = 0.5
+        def calc_weighted_absence(group):
+            weekday_absences = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
+            saturday_absences = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
+            # Count unique days for each
+            weekday_abs_count = len(weekday_absences['day_numeric'].unique())
+            saturday_abs_count = len(saturday_absences['day_numeric'].unique())
+            return weekday_abs_count + (saturday_abs_count * 0.5)
+        
+        # Calculate weighted days worked per employee
+        weighted_days = subset_df.groupby('name').apply(calc_weighted_days_worked).reset_index()
+        weighted_days.columns = ['name', 'weighted_days_worked']
+        
+        # Calculate weighted absence per employee
+        weighted_absence = subset_df.groupby('name').apply(calc_weighted_absence).reset_index()
+        weighted_absence.columns = ['name', 'weighted_absence']
+        
+        report = subset_df.groupby('name').agg({
+            'is_day_worked': 'sum',
+            'is_leave': 'sum',
+            'is_holiday': 'sum',
+            'is_unjustified_absence': 'sum',
+            'daily_target_for_worked_day': 'sum', 
+            'ENTRY > 10H': 'sum',
+            'ENTRY > 14H': 'sum', 
+            'ENTRY > 9H30': 'sum',
+            'NO LUNCH': 'sum',
+            'UNDER 8H': 'sum',
+            'IS HALF DAY': 'sum',
+            'hours_worked': 'sum',
+            'daily_lunch_minutes': 'sum',
+            'has_lunch_break': 'sum'
+        }).reset_index()
+        
+        # Merge weighted days worked
+        report = report.merge(weighted_days, on='name', how='left')
+        
+        # Merge weighted absence (overrides the simple sum)
+        report = report.merge(weighted_absence, on='name', how='left')
+        
+        report.rename(columns={
+            'name': 'Employee name',
+            'weighted_days_worked': 'days worked',
+            'weighted_absence': 'ABSENCE',
+            'daily_target_for_worked_day': 'TOTAL HOURS NEEDED', 
+            'hours_worked': 'TOTAL HOURS WORKED',
+            'IS HALF DAY': 'HALF DAYS'
+        }, inplace=True)
+        # Rename UNDER 8H based on table type
+        if is_ramadan_table:
+            report.rename(columns={'UNDER 8H': 'UNDER 7H'}, inplace=True)
+        saturday_records = subset_df[subset_df['day_str'].str.startswith('Sa', na=False)]
+        expected_saturdays = len(saturday_records['day_numeric'].unique())
+        # Use table-specific working days, not global
+        report['real working days'] = table_expected_days - report['is_leave'] - report['is_holiday']
+        saturday_work_by_employee = saturday_records[saturday_records['is_day_worked'] == 1].groupby('name').size().reset_index(name='saturdays_worked')
+        saturday_work_by_employee['saturdays_worked'] = saturday_work_by_employee['saturdays_worked'].apply(lambda x: 1 if x > 0 else 0)
+        report = report.merge(saturday_work_by_employee, left_on='Employee name', right_on='name', how='left')
+        report['saturdays_worked'] = report['saturdays_worked'].fillna(0)
+        if 'name' in report.columns:
+            report.drop('name', axis=1, inplace=True)
+        report['saturdays_absent'] = expected_saturdays - report['saturdays_worked']
+        report['weekdays_absent'] = report['real working days'] - report['saturdays_absent'] - report['days worked']
+        # Only count unjustified absences, not calculated absences
+        report.drop(['saturdays_worked', 'saturdays_absent', 'weekdays_absent'], axis=1, inplace=True)
+        report['avg_lunch_raw'] = report.apply(
+            lambda x: x['daily_lunch_minutes'] / x['has_lunch_break'] if x['has_lunch_break'] > 0 else (x['daily_lunch_minutes'] if x['daily_lunch_minutes'] > 0 else 0), axis=1
+        )
+        report['AVG LUNCH TIME'] = report['avg_lunch_raw'].apply(minutes_to_hhmm)
+        # Calculate balance BEFORE converting to HH:MM format
+        report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED']
+        # Convert hours columns to HH:MM format
+        report['TOTAL HOURS NEEDED'] = report['TOTAL HOURS NEEDED'].apply(decimal_hours_to_hhmm)
+        report['TOTAL HOURS WORKED'] = report['TOTAL HOURS WORKED'].apply(decimal_hours_to_hhmm)
+        report['Balance of hours worked'] = report['balance_raw'].apply(decimal_hours_to_hhmm)
+        # Get column list and mark which ones should show '-' for Ramadan
+        final_cols = [
+            'Employee name', 
+            'real working days', 
+            'days worked',
+            'ABSENCE', 
+            'HALF DAYS', 
+            'UNDER 8H' if not is_ramadan_table else 'UNDER 7H', 
+            'NO LUNCH', 
+            'AVG LUNCH TIME',
+            'ENTRY > 14H', 
+            'ENTRY > 10H', 
+            'ENTRY > 9H30', 
+            'TOTAL HOURS NEEDED', 
+            'TOTAL HOURS WORKED', 
+            'Balance of hours worked'
+        ]
+        # Columns to show '-' for Ramadan
+        ramadan_dash_cols = ['NO LUNCH', 'AVG LUNCH TIME', 'ENTRY > 14H']
+        return report[final_cols].sort_values('ABSENCE', ascending=False), (ramadan_dash_cols if is_ramadan_table else [])
 
-    report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED']
-    report['Balance of hours worked'] = report['balance_raw'].apply(decimal_hours_to_hhmm)
+    # Generate reports with table-specific working days
+    normal_report, _ = generate_report_from_df(normal_df, normal_working_days, is_ramadan_table=False) if has_normal_data else (None, [])
+    ramadan_report, ramadan_dash_cols = generate_report_from_df(ramadan_df, ramadan_working_days, is_ramadan_table=True) if has_ramadan_data else (None, [])
 
     # --- EXPORT ---
-    final_cols = [
-        'Employee name', 
-        'real working days', 
-        'days worked',
-        'ABSENCE', 
-        'HALF DAYS', 
-        'UNDER 8H', 
-        'NO LUNCH', 
-        'AVG LUNCH TIME',
-        'ENTRY > 14H', 
-        'ENTRY > 10H', 
-        'ENTRY > 9H30', 
-        'TOTAL HOURS NEEDED', 
-        'TOTAL HOURS WORKED', 
-        'Balance of hours worked'
-    ]
-    
-    final_df = report[final_cols]
-    
-    # Sort by ABSENCE column from highest to lowest
-    final_df = final_df.sort_values('ABSENCE', ascending=False)
-
     try:
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-            # Ajouter l'en-tête sur la première ligne
-            final_df.to_excel(writer, sheet_name='Monthly Summary', index=False, startrow=2, header=False)
-            
             workbook = writer.book
-            worksheet = writer.sheets['Monthly Summary']
+            worksheet = workbook.add_worksheet('Monthly Summary')
             
-            # Format pour l'en-tête de période
+            # Formats
             header_title = workbook.add_format({
                 'bold': True, 'align': 'center', 'valign': 'vcenter',
                 'font_size': 14, 'font_color': '#2F5597', 'border': 1
             })
-            
-            # Écrire l'en-tête de période sur la première ligne (fusionnée)
-            if len(final_df.columns) > 1:
-                worksheet.merge_range(0, 0, 0, len(final_df.columns) - 1, header_text, header_title)
-            else:
-                worksheet.write(0, 0, header_text, header_title)
-            
+            section_header = workbook.add_format({
+                'bold': True, 'align': 'center', 'valign': 'vcenter',
+                'font_size': 12, 'fg_color': '#E7E6E6', 'border': 1
+            })
             header_format = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
                 'fg_color': '#4472C4', 'font_color': 'white', 'border': 1
             })
-            
             header_red = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
                 'fg_color': '#C00000', 'font_color': 'white', 'border': 1
             })
-
             header_orange = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
                 'fg_color': '#ED7D31', 'font_color': 'white', 'border': 1
             })
-
             body_format = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
             text_format = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter'})
-            
-            # Red format for ABSENCE column cells with value > 0
             absence_red_format = workbook.add_format({
                 'border': 1, 'align': 'center', 'valign': 'vcenter', 
                 'bg_color': '#FFC7CE', 'font_color': '#9C0006'
             })
             
-            # Write Headers
-            for col_num, value in enumerate(final_df.columns.values):
-                if "14H" in value:
-                     worksheet.write(1, col_num, value, header_red)
-                elif "HALF DAYS" in value:
-                    worksheet.write(1, col_num, value, header_orange)
-                else:
-                    worksheet.write(1, col_num, value, header_format)
+            current_row = 0
+            num_cols = 15
             
-            # Write Data
-            for i, col in enumerate(final_df.columns):
-                if col == 'Employee name':
-                    cell_fmt = text_format
-                    width = 20  # Reduced from 25
-                elif col in ['real working days', 'days worked', 'ABSENCE', 'HALF DAYS', 'UNDER 8H', 'NO LUNCH', 'ENTRY > 14H', 'ENTRY > 10H', 'ENTRY > 9H30']:
-                    cell_fmt = body_format
-                    width = 10  # Count columns - narrower
-                elif col in ['AVG LUNCH TIME']:
-                    cell_fmt = body_format
-                    width = 12  # Time column - medium width
-                elif col in ['TOTAL HOURS NEEDED', 'TOTAL HOURS WORKED', 'Balance of hours worked']:
-                    cell_fmt = body_format
-                    width = 14  # Hour columns - slightly wider
-                else:
-                    cell_fmt = body_format
-                    width = 12  # Default width
-                
-                worksheet.set_column(i, i, width)
-                
-                for row_idx, value in enumerate(final_df[col]):
-                    if pd.isna(value): value = ""
-                    
-                    # Show zeros for count columns, empty strings for time columns
-                    if col in ['real working days', 'days worked', 'ABSENCE', 'HALF DAYS', 'UNDER 8H', 'NO LUNCH', 'ENTRY > 14H', 'ENTRY > 10H', 'ENTRY > 9H30']:
-                        if value == 0: value = 0  # Keep zeros for count columns
-                    elif col in ['AVG LUNCH TIME', 'Balance of hours worked', 'TOTAL HOURS WORKED']:
-                        if value == 0 or value == "00:00": value = ""  # Empty string for time columns
-                    
-                    # Apply red formatting only to ABSENCE column if value > 0
-                    if col == 'ABSENCE' and value > 0:
-                        worksheet.write(row_idx + 2, i, value, absence_red_format)
+            # Write main title
+            worksheet.merge_range(0, 0, 0, num_cols - 1, header_text, header_title)
+            current_row = 2
+            
+            # Helper function to write a table
+            def write_table(report_df, table_title, start_row, dash_columns=None):
+                if report_df is None or report_df.empty:
+                    return start_row
+                dash_columns = dash_columns or []
+                # Write section header
+                worksheet.merge_range(start_row, 0, start_row, num_cols - 1, table_title, section_header)
+                start_row += 1
+                # Write column headers
+                for col_num, value in enumerate(report_df.columns.values):
+                    if "14H" in str(value):
+                        worksheet.write(start_row, col_num, value, header_red)
+                    elif "HALF DAYS" in str(value):
+                        worksheet.write(start_row, col_num, value, header_orange)
                     else:
-                        worksheet.write(row_idx + 2, i, value, cell_fmt)
+                        worksheet.write(start_row, col_num, value, header_format)
+                start_row += 1
+                # Write data rows
+                for row_idx, row_data in report_df.iterrows():
+                    for col_num, col_name in enumerate(report_df.columns):
+                        value = row_data[col_name]
+                        # Show '-' for Ramadan dash columns
+                        if col_name in dash_columns:
+                            worksheet.write(start_row, col_num, "-", body_format)
+                            continue
+                        if pd.isna(value): 
+                            value = ""
+                        # Show zeros for count columns, empty strings for time columns
+                        if col_name in ['real working days', 'days worked', 'ABSENCE', 'HALF DAYS', 'UNDER 8H', 'UNDER 7H', 'NO LUNCH', 'ENTRY > 14H', 'ENTRY > 10H', 'ENTRY > 9H30']:
+                            if value == 0: 
+                                value = 0
+                        elif col_name in ['AVG LUNCH TIME', 'Balance of hours worked', 'TOTAL HOURS WORKED']:
+                            if value == 0 or value == "00:00": 
+                                value = ""
+                        # Determine cell format
+                        if col_name == 'Employee name':
+                            cell_fmt = text_format
+                        else:
+                            cell_fmt = body_format
+                        # Apply red formatting for ABSENCE column if value > 0
+                        if col_name == 'ABSENCE' and value > 0:
+                            worksheet.write(start_row, col_num, value, absence_red_format)
+                        else:
+                            worksheet.write(start_row, col_num, value, cell_fmt)
+                    start_row += 1
+                return start_row + 1  # Add spacing after table
+            
+            # Write Normal Days table first (if exists)
+            if has_normal_data:
+                normal_start = normal_date_range[0].strftime('%d/%m/%Y') if normal_date_range else ''
+                normal_end = normal_date_range[1].strftime('%d/%m/%Y') if normal_date_range else ''
+                normal_title = f"JOURS NORMAUX (8h/jour) - Du {normal_start} au {normal_end}"
+                current_row = write_table(normal_report, normal_title, current_row, dash_columns=[])
+            
+            # Write Ramadan Days table (if exists)
+            if has_ramadan_data:
+                ramadan_start = ramadan_date_range[0].strftime('%d/%m/%Y') if ramadan_date_range else '19/02/2026'
+                ramadan_end = ramadan_date_range[1].strftime('%d/%m/%Y') if ramadan_date_range else '20/03/2026'
+                ramadan_title = f"JOURS DU RAMADAN (7h/jour, pas de déjeuner) - Du {ramadan_start} au {ramadan_end}"
+                current_row = write_table(ramadan_report, ramadan_title, current_row, dash_columns=ramadan_dash_cols)
+            
+            # Set column widths
+            for i in range(num_cols):
+                if i == 0:  # Employee name
+                    worksheet.set_column(i, i, 20)
+                elif i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:  # Count columns
+                    worksheet.set_column(i, i, 10)
+                elif i in [11, 12, 13]:  # Time/Hour columns
+                    worksheet.set_column(i, i, 14)
+                else:
+                    worksheet.set_column(i, i, 12)
 
         print(f"\nSUCCESS! Monthly report generated: {output_path}")
         return output_path
 
     except Exception as e:
         print(f"Error saving file: {e}")
+        import traceback
+        print(f"DEBUG: {traceback.format_exc()}")
         return None
 
 def main():

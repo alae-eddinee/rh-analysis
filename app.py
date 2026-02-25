@@ -8,7 +8,6 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_INPUT_DIR = os.path.join(BASE_DIR, "temp_input")
 TEMP_OUTPUT_DIR = os.path.join(BASE_DIR, "temp_output")
-TEMP_CSV_DIR = os.path.join(BASE_DIR, "temp_csv")
 
 # --- IMPORT FUNCTIONS DYNAMICALLY ---
 def load_module_from_path(module_name, file_path):
@@ -18,16 +17,16 @@ def load_module_from_path(module_name, file_path):
     spec.loader.exec_module(module)
     return module
 
-# Charger les scripts d'analyse (versions CSV)
-csv_extractor = load_module_from_path("csv_extractor", os.path.join(BASE_DIR, "csv_extractor.py"))
-daily_script = load_module_from_path("daily_analysis_csv", os.path.join(BASE_DIR, "analysis_per_day_csv.py"))
-monthly_script = load_module_from_path("monthly_analysis_csv", os.path.join(BASE_DIR, "analysis_per_month_csv.py"))
+# Charger les scripts d'analyse
+# "analysis_per_day+count.py" contient des caractères spéciaux, donc chargement dynamique nécessaire
+daily_script = load_module_from_path("daily_analysis", os.path.join(BASE_DIR, "analysis_per_day+count.py"))
+monthly_script = load_module_from_path("monthly_analysis", os.path.join(BASE_DIR, "analysis_per_month.py"))
 graph_script = load_module_from_path("lateness_graph", os.path.join(BASE_DIR, "late_arrivals_graph.py"))
 
 # --- UTILS ---
 def reset_dirs():
     """Réinitialise les dossiers temporaires."""
-    for folder in [TEMP_INPUT_DIR, TEMP_OUTPUT_DIR, TEMP_CSV_DIR]:
+    for folder in [TEMP_INPUT_DIR, TEMP_OUTPUT_DIR]:
         if os.path.exists(folder):
             try:
                 shutil.rmtree(folder)
@@ -40,9 +39,9 @@ st.set_page_config(page_title="RH Analysis Tool", page_icon="📊", layout="wide
 
 st.title("📊 RH Data Analysis Automation")
 st.markdown("""
-Cette application permet d'automatiser l'analyse des pointages avec une extraction CSV pour éviter les erreurs d'interprétation.
+Cette application permet d'automatiser l'analyse des pointages.
 1. **Téléversez** les fichiers Excel bruts dans la zone ci-dessous.
-2. Cliquez sur **Lancer l'Analyse** pour extraire les données en CSV puis traiter.
+2. Cliquez sur **Lancer l'Analyse**.
 3. **Téléchargez** les rapports Excel et le graphique générés.
 """)
 
@@ -70,52 +69,34 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                 f.write(uploaded_file.getbuffer())
         progress_bar.progress(30)
 
-        # Step 3: Extract CSV Data
-        status_text.text("Extraction des données en format CSV...")
-        try:
-            csv_success = csv_extractor.process_all_excel_to_csv(TEMP_INPUT_DIR, TEMP_CSV_DIR)
-            if csv_success:
-                st.success("✅ Extraction CSV réussie")
-            else:
-                st.warning("⚠️ L'extraction CSV a échoué ou n'a pas généré de données")
-                progress_bar.progress(100)
-                st.stop()
-        except Exception as e:
-            st.error(f"Erreur Extraction CSV: {e}")
-            progress_bar.progress(100)
-            st.stop()
-        progress_bar.progress(50)
-
-        # Step 4: Run Daily Analysis (from CSV)
+        # Step 3: Run Daily Analysis
         status_text.text("Exécution de l'analyse quotidienne...")
         try:
-            daily_output = daily_script.process_daily_analysis_from_csv(TEMP_CSV_DIR, TEMP_OUTPUT_DIR)
+            daily_output = daily_script.process_daily_analysis(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
             if daily_output:
                 st.success(f"✅ Analyse Quotidienne générée : {os.path.basename(daily_output)}")
             else:
                 st.warning("⚠️ L'analyse quotidienne n'a rien généré (vérifiez les données).")
         except Exception as e:
             st.error(f"Erreur Analyse Quotidienne: {e}")
-        progress_bar.progress(70)
+        progress_bar.progress(50)
 
-        # Step 5: Run Monthly Analysis (from CSV)
+        # Step 4: Run Monthly Analysis
         status_text.text("Exécution de l'analyse mensuelle...")
         try:
-            monthly_output = monthly_script.process_monthly_analysis_from_csv(TEMP_CSV_DIR, TEMP_OUTPUT_DIR)
+            monthly_output = monthly_script.process_monthly_analysis(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
             if monthly_output:
                 st.success(f"✅ Analyse Mensuelle générée : {os.path.basename(monthly_output)}")
             else:
                 st.warning("⚠️ L'analyse mensuelle n'a rien généré.")
         except Exception as e:
             st.error(f"Erreur Analyse Mensuelle: {e}")
-        progress_bar.progress(85)
+        progress_bar.progress(70)
 
-        # Step 6: Generate Graph (from CSV)
+        # Step 5: Generate Graph
         status_text.text("Génération du graphique des retards...")
         graph_output = None
         try:
-            # Note: The graph script might need to be updated to work with CSV too
-            # For now, we'll try the original approach
             graph_output = graph_script.generate_lateness_graph(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
             if graph_output:
                 st.success(f"✅ Graphique généré : {os.path.basename(graph_output)}")
@@ -123,7 +104,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                 st.warning("⚠️ Impossible de générer le graphique.")
         except Exception as e:
             st.error(f"Erreur Graphique: {e}")
-        progress_bar.progress(95)
+        progress_bar.progress(90)
 
         # Step 6: Finalize
         status_text.text("Finalisation...")
