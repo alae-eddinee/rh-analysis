@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # --- CONFIGURATION ---
 CHEMIN_DOSSIER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
-NOM_FICHIER_SORTIE = "Analyse_Quotidienne_TAP.xlsx"
+NOM_FICHIER_SORTIE = "Analyse_Quotidienne_Production.xlsx"
 
 # LISTE DES EMPLOYÉS À EXCLURE PAR NOM (Insensible à la casse)
 EMPLOYES_EXCLUS = [
@@ -19,8 +19,12 @@ EMPLOYES_EXCLUS = [
     "HMOURI ALI"
 ]
 
-# TAP WORKER CODES - Only process employees with these codes
-TAP_CODES = ['130', '131', '140', '141']
+# PRODUCTION WORKER CODES - Only process employees with these codes
+PRODUCTION_CODES = ['130', '131', '140', '141']
+
+# Hours per day for production workers
+WEEKDAY_HOURS = 9.0
+SATURDAY_HOURS = 5.0
 
 # --- CLASSE UTILITAIRE POUR COMPATIBILITÉ XLS ---
 class MockCell:
@@ -29,12 +33,13 @@ class MockCell:
         self.value = value
 
 def clean_name_string(name):
-    """Normalise les noms pour assurer la correspondance malgré les espaces/caractères cachés."""
+    """Minimal cleaning - preserve original case and spacing."""
     if not name:
         return ""
-    name = str(name).upper()
+    name = str(name)
+    # Only remove problematic whitespace characters but preserve original format
     name = name.replace('\xa0', ' ').replace('\t', ' ').replace('\n', ' ')
-    name = re.sub(r'\s+', ' ', name)
+    # Don't uppercase, don't normalize multiple spaces - keep original name
     return name.strip()
 
 def parse_scan_times(scan_str):
@@ -84,7 +89,7 @@ def get_sheet_rows(file_path):
                 return
 
 def process_employee_buffer(employee_data):
-    """Décide si un employé est un TAP worker basé sur les codes HJ."""
+    """Décide si un employé est un Production worker basé sur les codes HJ."""
     if not employee_data or not employee_data.get('records'):
         return []
 
@@ -100,7 +105,7 @@ def process_employee_buffer(employee_data):
     if not weekday_recs:
         return records
 
-    tap_matches = 0
+    prod_matches = 0
     for r in weekday_recs:
         raw_hj = str(r['hj_code'])
         if '.' in raw_hj:
@@ -108,11 +113,11 @@ def process_employee_buffer(employee_data):
         else:
             hj = raw_hj.strip()
             
-        if hj in TAP_CODES:
-            tap_matches += 1
+        if hj in PRODUCTION_CODES:
+            prod_matches += 1
     
-    ratio = tap_matches / len(weekday_recs)
-    # TAP analysis: ONLY include if more than 50% of codes are TAP codes
+    ratio = prod_matches / len(weekday_recs)
+    # Production analysis: ONLY include if more than 50% of codes are production codes
     if ratio > 0.5:
         return records
     
@@ -322,7 +327,7 @@ def create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, f
     result.columns = [output_header, 'Count', '%']
     return result
 
-def process_tap_daily_analysis(input_dir, output_dir):
+def process_production_daily_analysis(input_dir, output_dir):
     """Traite les fichiers TAP dans input_dir et sauvegarde l'analyse dans output_dir."""
     if not os.path.exists(input_dir):
         print(f"Dossier non trouvé : {input_dir}")
@@ -333,7 +338,7 @@ def process_tap_daily_analysis(input_dir, output_dir):
 
     all_data = []
 
-    print("Analyse des fichiers TAP...")
+    print("Analyse des fichiers Production...")
     for file in os.listdir(input_dir):
         if file.lower().endswith(('.xls', '.xlsx')) and not file.startswith("Daily_Analysis") and not file.startswith("Monthly") and not file.startswith("Master") and not file.startswith("~$"):
             print(f"Lecture : {file}...")
@@ -342,7 +347,8 @@ def process_tap_daily_analysis(input_dir, output_dir):
             all_data.extend(records)
 
     if not all_data:
-        print("Aucune donnée TAP valide trouvée.")
+        print("DEBUG: No data extracted - check PRODUCTION_CODES filter")
+        print(f"PRODUCTION_CODES = {PRODUCTION_CODES}")
         return None
 
     df = pd.DataFrame(all_data)
@@ -355,7 +361,7 @@ def process_tap_daily_analysis(input_dir, output_dir):
         print(f"Supprimé {initial_len - len(df)} enregistrements basés sur la liste d'exclusion de noms.")
     
     if df.empty:
-        print("Toutes les données filtrées.")
+        print(f"DEBUG: DataFrame empty after filtering. Initial records: {len(all_data)}")
         return None
 
     # --- DÉTECTION CHRONOLOGIQUE ---
@@ -408,10 +414,11 @@ def process_tap_daily_analysis(input_dir, output_dir):
         month_name = month_names.get(month_num, f'Mois {month_num}')
         
     else:
-        print("Erreur: Aucune donnée numérique de jour trouvée.")
+        print("DEBUG: No day_numeric column found in data")
+        print(f"DEBUG: Available columns: {df.columns.tolist()}")
         return None
 
-    print("\nCalcul des métriques TAP...")
+    print("\nCalcul des métriques Production...")
     results = df.apply(analyze_row, axis=1)
     
     df['is_late_800'] = [x[0] for x in results]
@@ -446,13 +453,25 @@ def process_tap_daily_analysis(input_dir, output_dir):
     
     monthly_stats = monthly_stats_weekday.combine_first(monthly_stats_saturday)
     
+    # --- GET TARGET DAY FOR DAILY ANALYSIS ---
+    # Get actual available days from the (possibly filtered) df
+    available_days = df['day_numeric'].unique()
+    print(f"DEBUG: Available days after filtering: {available_days}")
+    if len(available_days) == 0:
+        print("DEBUG: No days available after filtering")
+        return None
+    
+    # Use the last available day in the filtered df
+    target_report_day = max(available_days)
+    
     if 'day_numeric' in df.columns:
         daily_df = df[df['day_numeric'] == target_report_day].copy()
     else:
         daily_df = pd.DataFrame()
 
     if daily_df.empty:
-        print(f"\nATTENTION : Aucun enregistrement trouvé pour le Jour {target_report_day}.")
+        print(f"DEBUG: daily_df empty for target day {target_report_day}")
+        print(f"DEBUG: df has {len(df)} records, day_numeric values: {df['day_numeric'].unique()}")
         return None
 
     sample_day_str = daily_df.iloc[0]['day_str'] if not daily_df.empty else ""
@@ -483,20 +502,20 @@ def process_tap_daily_analysis(input_dir, output_dir):
         else:
             total_days = len(unique_days_in_order)
         
-        dynamic_filename = f"POINTAGE TAP ANALYSE DU {real_start_day:02d}-{month_num}-{year_num} A {real_end_day:02d}-{month_num}-{year_num}.xlsx"
+        dynamic_filename = f"POINTAGE PRODUCTION ANALYSE DU {real_start_day:02d}-{month_num}-{year_num} A {real_end_day:02d}-{month_num}-{year_num}.xlsx"
         output_path = os.path.join(output_dir, dynamic_filename)
         
-        header_text = f"Analyse Quotidienne TAP - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
+        header_text = f"Analyse Quotidienne Production - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
     else:
-        header_text = "Analyse Quotidienne TAP - Période non spécifiée"
+        header_text = "Analyse Quotidienne Production - Période non spécifiée"
         output_path = os.path.join(output_dir, NOM_FICHIER_SORTIE)
     
     try:
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-            main_list.to_excel(writer, sheet_name='Analyse TAP Quotidienne', index=False, header=False, startrow=2)
+            main_list.to_excel(writer, sheet_name='Analyse Production Quotidienne', index=False, header=False, startrow=2)
             
             workbook = writer.book
-            worksheet = writer.sheets['Analyse TAP Quotidienne']
+            worksheet = writer.sheets['Analyse Production Quotidienne']
             
             header_title = workbook.add_format({
                 'bold': True, 'align': 'center', 'valign': 'vcenter',
@@ -566,7 +585,7 @@ def process_tap_daily_analysis(input_dir, output_dir):
                     else:
                         worksheet.write(row_idx + 2, i, cell_val, col_format)
 
-        print(f"\nSUCCÈS ! Rapport TAP sauvegardé : {output_path}")
+        print(f"\nSUCCÈS ! Rapport Production sauvegardé : {output_path}")
         return output_path
 
     except Exception as e:
@@ -578,7 +597,7 @@ def main():
         print(f"Dossier non trouvé : {CHEMIN_DOSSIER}")
         return
     
-    output = process_tap_daily_analysis(CHEMIN_DOSSIER, CHEMIN_DOSSIER)
+    output = process_production_daily_analysis(CHEMIN_DOSSIER, CHEMIN_DOSSIER)
     if output:
         print(f"Fichier généré : {output}")
 

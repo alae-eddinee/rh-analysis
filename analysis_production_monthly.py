@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # --- CONFIGURATION ---
 FOLDER_PATH = os.path.join(os.path.dirname(__file__), "Data")
-OUTPUT_FILENAME = "Monthly_TAP_Analysis.xlsx"
+OUTPUT_FILENAME = "Monthly_Production_Analysis.xlsx"
 
 # LIST OF EMPLOYEES TO EXCLUDE (Case insensitive)
 EXCLUDED_EMPLOYEES = [
@@ -19,8 +19,12 @@ EXCLUDED_EMPLOYEES = [
     "HMOURI ALI"
 ]
 
-# TAP WORKER CODES - Only process employees with these codes
-TAP_CODES = ['130', '131', '140', '141']
+# PRODUCTION WORKER CODES - Only process employees with these codes
+PRODUCTION_CODES = ['130', '131', '140', '141']
+
+# Hours per day for production workers
+WEEKDAY_HOURS = 9.0
+SATURDAY_HOURS = 5.0
 
 # Days of week mapping
 DAYS_FRENCH = ['Lu', 'Ma', 'Me', 'Je', 'Ve', 'Sa', 'Di']
@@ -32,12 +36,13 @@ class MockCell:
         self.value = value
 
 def clean_name_string(name):
-    """Normalizes names to ensure matching works despite spaces/hidden chars."""
+    """Minimal cleaning - only remove hidden chars, preserve original case and spacing."""
     if not name:
         return ""
-    name = str(name).upper()
+    name = str(name)
+    # Only remove problematic whitespace characters but preserve original format
     name = name.replace('\xa0', ' ').replace('\t', ' ').replace('\n', ' ')
-    name = re.sub(r'\s+', ' ', name)
+    # Don't uppercase, don't normalize spaces - keep original name
     return name.strip()
 
 def parse_scan_times(scan_str):
@@ -117,7 +122,7 @@ def get_sheet_rows(file_path):
                 return
 
 def process_employee_buffer(employee_data):
-    """Decides if an employee is a TAP worker based on HJ codes."""
+    """Decides if an employee is a Production worker based on HJ codes."""
     if not employee_data or not employee_data.get('records'):
         return []
 
@@ -127,7 +132,7 @@ def process_employee_buffer(employee_data):
     if not weekday_recs:
         return records
 
-    tap_matches = 0
+    prod_matches = 0
     for r in weekday_recs:
         raw_hj = str(r.get('hj_code', ''))
         if '.' in raw_hj:
@@ -135,11 +140,11 @@ def process_employee_buffer(employee_data):
         else:
             hj = raw_hj.strip()
             
-        if hj in TAP_CODES:
-            tap_matches += 1
+        if hj in PRODUCTION_CODES:
+            prod_matches += 1
     
-    ratio = tap_matches / len(weekday_recs)
-    # TAP analysis: ONLY include if more than 50% of codes are TAP codes
+    ratio = prod_matches / len(weekday_recs)
+    # Production analysis: ONLY include if more than 50% of codes are production codes
     if ratio > 0.5:
         return records
     
@@ -236,6 +241,7 @@ def extract_data(file_path):
                 daily_target_for_worked_day = 0.0 
                 daily_lunch_minutes = 0
                 has_lunch_break = 0 
+                no_lunch_penalty = 0  # 1h penalty for missing lunch scan
                 times_list = []
                 scan_count = 0
 
@@ -252,18 +258,21 @@ def extract_data(file_path):
                     times_list, scan_count = parse_scan_times(raw_scan_val)
                     hours_worked = calculate_hours_from_scans(times_list)
                     
-                    # TAP: Friday lunch is 1pm-2:30pm (90 min), other days regular
+                    # Production: Friday lunch is 1pm-2:30pm (90 min), other days regular
                     if len(times_list) >= 4 and not is_sat:
                         daily_lunch_minutes = calculate_lunch_minutes(times_list, is_friday=is_fri)
                         has_lunch_break = 1
+                    elif not is_sat and len(times_list) > 0:
+                        # No lunch break scanned - apply 1h penalty
+                        no_lunch_penalty = 1
                     
                     if hours_worked > 0:
                         is_day_worked = 1
-                        # TAP: 9h workday (8am-6pm with lunch), Saturday 5h
+                        # Production: 9h workday (8am-6pm with lunch), Saturday 5h
                         if is_sat:
-                            daily_target_for_worked_day = 5.0
+                            daily_target_for_worked_day = SATURDAY_HOURS
                         else:
-                            daily_target_for_worked_day = 9.0
+                            daily_target_for_worked_day = WEEKDAY_HOURS
 
                 if date_obj:
                     day_numeric = date_obj.day
@@ -286,6 +295,7 @@ def extract_data(file_path):
                         'daily_target_for_worked_day': daily_target_for_worked_day,
                         'daily_lunch_minutes': daily_lunch_minutes,
                         'has_lunch_break': has_lunch_break,
+                        'no_lunch_penalty': no_lunch_penalty,  # Track lunch penalty
                         'month_num': month_num,
                         'year_num': year_num,
                         'is_friday': is_fri,
@@ -311,11 +321,11 @@ def analyze_record(row):
     is_half_day = 0
 
     if row['is_leave'] or row['is_holiday']:
-        return 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0
 
     times = row['times_list']
     if not times: 
-        return 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0
 
     first_scan = datetime.strptime(times[0], '%H:%M')
     
@@ -343,16 +353,16 @@ def analyze_record(row):
         no_lunch = 1 if len(times) < 4 else 0
 
     # --- TARGET HOURS ---
-    # TAP: 9h for weekdays, 5h for Saturdays
+    # Production: 9h for weekdays, 5h for Saturdays
     if is_sat:
-        target = 5.0
+        target = SATURDAY_HOURS
     else:
-        target = 9.0
+        target = WEEKDAY_HOURS
     
     is_under = 1 if row['hours_worked'] > 0 and row['hours_worked'] < target else 0
 
     # --- HALF DAY LOGIC ---
-    # TAP: Half day if worked less than 8h (for 9h target) or morning only/afternoon only
+    # Production: Half day if worked less than 8h (for 9h target) or morning only/afternoon only
     if row['is_day_worked'] and not is_sat and len(times) >= 2:
         try:
             t_entry = datetime.strptime(times[0], '%H:%M')
@@ -370,7 +380,10 @@ def analyze_record(row):
         except:
             pass 
 
-    return is_late_800, is_late_1000, no_lunch, is_under, is_half_day
+    # Check for no lunch penalty
+    no_lunch_penalty = row.get('no_lunch_penalty', 0)
+
+    return is_late_800, is_late_1000, no_lunch, is_under, is_half_day, no_lunch_penalty
 
 def calculate_weighted_business_days_in_range(start_date, end_date):
     """Calculate weighted business days: weekdays = 1.0, Saturdays = 0.5"""
@@ -411,8 +424,8 @@ def decimal_hours_to_hhmm(decimal_hours):
     time_str = f"{hours:02}:{minutes:02}"
     return f"-{time_str}" if is_negative else time_str
 
-def process_tap_monthly_analysis(input_dir, output_dir):
-    """Process TAP worker files and generate monthly analysis."""
+def process_production_monthly_analysis(input_dir, output_dir):
+    """Process Production worker files and generate monthly analysis."""
     if not os.path.exists(input_dir):
         print(f"Folder not found: {input_dir}")
         return None
@@ -421,14 +434,14 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         os.makedirs(output_dir)
 
     all_data = []
-    print("Reading TAP files...")
+    print("Reading Production files...")
     for file in os.listdir(input_dir):
         if file.lower().endswith(('.xls', '.xlsx')) and not file.startswith("Daily_Analysis") and not file.startswith("Monthly") and not file.startswith("Master") and not file.startswith("~$"):
             print(f"Processing: {file}")
             all_data.extend(extract_data(os.path.join(input_dir, file)))
 
     if not all_data:
-        print("No TAP data found.")
+        print("No Production data found.")
         return None
 
     df = pd.DataFrame(all_data)
@@ -515,9 +528,9 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         global_expected_days = calculate_weighted_business_days_in_range(final_min_date, final_max_date)
         print(f"Theoretical Business Days (weighted) in period: {global_expected_days}")
         
-        dynamic_filename = f"Monthly_TAP_Analysis_{real_start_day:02d}-{month_num}-{year_num}_A_{real_end_day:02d}-{month_num}-{year_num}.xlsx"
+        dynamic_filename = f"Monthly_Production_Analysis_{real_start_day:02d}-{month_num}-{year_num}_A_{real_end_day:02d}-{month_num}-{year_num}.xlsx"
         output_path = os.path.join(output_dir, dynamic_filename)
-        header_text = f"Analyse Mensuelle TAP - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
+        header_text = f"Analyse Mensuelle Production - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
 
     else:
         print("Could not detect valid dates. Exiting.")
@@ -532,7 +545,7 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         print("All data filtered out.")
         return None
 
-    print("Analyzing TAP metrics...")
+    print("Analyzing Production metrics...")
     metrics = df.apply(analyze_record, axis=1)
     
     df['ENTRY > 8H'] = [x[0] for x in metrics]
@@ -540,6 +553,7 @@ def process_tap_monthly_analysis(input_dir, output_dir):
     df['NO LUNCH'] = [x[2] for x in metrics]
     df['UNDER 9H'] = [x[3] for x in metrics]
     df['IS HALF DAY'] = [x[4] for x in metrics]
+    df['NO_LUNCH_PENALTY'] = [x[5] for x in metrics]
 
     # Calculate date ranges and working days
     min_date = df['full_date'].min()
@@ -547,12 +561,16 @@ def process_tap_monthly_analysis(input_dir, output_dir):
     working_days = calculate_weighted_business_days_in_range(min_date, max_date)
     date_range = (min_date, max_date)
     
-    print(f"DEBUG: TAP table date range: {min_date} to {max_date}")
-    print(f"DEBUG: TAP table weighted working days: {working_days}")
+    print(f"DEBUG: Production table date range: {min_date} to {max_date}")
+    print(f"DEBUG: Production table weighted working days: {working_days}")
 
-    def generate_tap_report(subset_df, table_expected_days):
+    def generate_production_report(subset_df, table_expected_days):
         if subset_df.empty:
             return None
+        
+        # Calculate starting day for each employee (first pointage date)
+        starting_days = subset_df.groupby('name')['full_date'].min().reset_index()
+        starting_days.columns = ['name', 'starting_day']
         
         def calc_weighted_days_worked(group):
             weekdays = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
@@ -567,6 +585,10 @@ def process_tap_monthly_analysis(input_dir, output_dir):
             weekday_abs_count = len(weekday_absences['day_numeric'].unique())
             saturday_abs_count = len(saturday_absences['day_numeric'].unique())
             return weekday_abs_count + (saturday_abs_count * 0.5)
+        
+        # Calculate no lunch penalty per employee
+        lunch_penalty = subset_df.groupby('name')['NO_LUNCH_PENALTY'].sum().reset_index()
+        lunch_penalty.columns = ['name', 'lunch_penalty_hours']
         
         weighted_days = subset_df.groupby('name').apply(calc_weighted_days_worked).reset_index()
         weighted_days.columns = ['name', 'weighted_days_worked']
@@ -592,6 +614,8 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         
         report = report.merge(weighted_days, on='name', how='left')
         report = report.merge(weighted_absence, on='name', how='left')
+        report = report.merge(lunch_penalty, on='name', how='left')
+        report = report.merge(starting_days, on='name', how='left')
         
         report.rename(columns={
             'name': 'Employee name',
@@ -604,7 +628,42 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         
         saturday_records = subset_df[subset_df['day_str'].str.startswith('Sa', na=False)]
         expected_saturdays = len(saturday_records['day_numeric'].unique())
-        report['real working days'] = table_expected_days - report['is_leave'] - report['is_holiday']
+        
+        # Convert real working days to hours (multiply by 9 for weekdays + 5 for Saturdays)
+        # Calculate: weekdays * 9 + saturdays * 5
+        real_working_days_value = table_expected_days - report['is_leave'] - report['is_holiday']
+        
+        # For hours calculation: count weekdays and saturdays separately
+        def calc_real_working_hours(days_val):
+            # Approximate: assume 5 weekdays for every 0.5 saturday in weighted count
+            # This is a simplified calculation - assumes standard work pattern
+            sat_count = expected_saturdays
+            # Calculate weekday count from weighted total
+            weekday_count = max(0, days_val - (sat_count * 0.5))
+            return (weekday_count * WEEKDAY_HOURS) + (sat_count * SATURDAY_HOURS)
+        
+        report['real working hours'] = real_working_days_value.apply(calc_real_working_hours)
+        
+        # Convert days worked to hours
+        def calc_worked_hours(days_val):
+            # Same logic: separate weekdays and saturdays
+            sat_count = expected_saturdays
+            weekday_count = max(0, days_val - (sat_count * 0.5))
+            return (weekday_count * WEEKDAY_HOURS) + (sat_count * SATURDAY_HOURS)
+        
+        # Actually, let's use a more accurate approach - calculate based on actual days worked
+        def calc_days_worked_hours(group):
+            weekdays = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
+            saturdays = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
+            weekday_count = len(weekdays['day_numeric'].unique())
+            saturday_count = len(saturdays['day_numeric'].unique())
+            return (weekday_count * WEEKDAY_HOURS) + (saturday_count * SATURDAY_HOURS)
+        
+        worked_hours_per_employee = subset_df.groupby('name').apply(calc_days_worked_hours).reset_index()
+        worked_hours_per_employee.columns = ['name', 'hours worked']
+        report = report.merge(worked_hours_per_employee, left_on='Employee name', right_on='name', how='left')
+        if 'name' in report.columns:
+            report.drop('name', axis=1, inplace=True)
         
         saturday_work_by_employee = saturday_records[saturday_records['is_day_worked'] == 1].groupby('name').size().reset_index(name='saturdays_worked')
         saturday_work_by_employee['saturdays_worked'] = saturday_work_by_employee['saturdays_worked'].apply(lambda x: 1 if x > 0 else 0)
@@ -613,7 +672,7 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         if 'name' in report.columns:
             report.drop('name', axis=1, inplace=True)
         report['saturdays_absent'] = expected_saturdays - report['saturdays_worked']
-        report['weekdays_absent'] = report['real working days'] - report['saturdays_absent'] - report['days worked']
+        report['weekdays_absent'] = report['days worked'] - report['saturdays_worked'] * 0.5
         report.drop(['saturdays_worked', 'saturdays_absent', 'weekdays_absent'], axis=1, inplace=True)
         
         report['avg_lunch_raw'] = report.apply(
@@ -621,15 +680,23 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         )
         report['AVG LUNCH TIME'] = report['avg_lunch_raw'].apply(minutes_to_hhmm)
         
-        report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED']
+        # Apply 1h deduction for each no-lunch penalty
+        report['lunch_penalty_hours'] = report['lunch_penalty_hours'].fillna(0)
+        
+        # Calculate balance with lunch penalty deducted
+        report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED'] - report['lunch_penalty_hours']
         report['TOTAL HOURS NEEDED'] = report['TOTAL HOURS NEEDED'].apply(decimal_hours_to_hhmm)
         report['TOTAL HOURS WORKED'] = report['TOTAL HOURS WORKED'].apply(decimal_hours_to_hhmm)
         report['Balance of hours worked'] = report['balance_raw'].apply(decimal_hours_to_hhmm)
         
+        # Format starting day
+        report['STARTING DAY'] = report['starting_day'].apply(lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '')
+        
         final_cols = [
             'Employee name', 
-            'real working days', 
-            'days worked',
+            'STARTING DAY',
+            'real working hours', 
+            'hours worked',
             'ABSENCE', 
             'HALF DAYS', 
             'UNDER 9H', 
@@ -643,13 +710,13 @@ def process_tap_monthly_analysis(input_dir, output_dir):
         ]
         return report[final_cols].sort_values('ABSENCE', ascending=False)
 
-    tap_report = generate_tap_report(df, working_days)
+    production_report = generate_production_report(df, working_days)
 
     # --- EXPORT ---
     try:
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
             workbook = writer.book
-            worksheet = workbook.add_worksheet('Monthly TAP Summary')
+            worksheet = workbook.add_worksheet('Monthly Production Summary')
             
             header_title = workbook.add_format({
                 'bold': True, 'align': 'center', 'valign': 'vcenter',
@@ -679,23 +746,23 @@ def process_tap_monthly_analysis(input_dir, output_dir):
             })
             
             current_row = 0
-            num_cols = 13
+            num_cols = 14
             
             # Write main title
             worksheet.merge_range(0, 0, 0, num_cols - 1, header_text, header_title)
             current_row = 2
             
             # Write table
-            if tap_report is not None and not tap_report.empty:
+            if production_report is not None and not production_report.empty:
                 table_start = min_date.strftime('%d/%m/%Y') if min_date else ''
                 table_end = max_date.strftime('%d/%m/%Y') if max_date else ''
-                table_title = f"JOURS TAP (9h/jour, 5h Samedi) - Du {table_start} au {table_end}"
+                table_title = f"JOURS PRODUCTION (9h/jour, 5h Samedi) - Du {table_start} au {table_end}"
                 
                 worksheet.merge_range(current_row, 0, current_row, num_cols - 1, table_title, section_header)
                 current_row += 1
                 
                 # Column headers
-                for col_num, value in enumerate(tap_report.columns.values):
+                for col_num, value in enumerate(production_report.columns.values):
                     if "ABSENCE" in str(value):
                         worksheet.write(current_row, col_num, value, header_red)
                     elif "HALF DAYS" in str(value):
@@ -705,12 +772,12 @@ def process_tap_monthly_analysis(input_dir, output_dir):
                 current_row += 1
                 
                 # Data rows
-                for row_idx, row_data in tap_report.iterrows():
-                    for col_num, col_name in enumerate(tap_report.columns):
+                for row_idx, row_data in production_report.iterrows():
+                    for col_num, col_name in enumerate(production_report.columns):
                         value = row_data[col_name]
                         if pd.isna(value): 
                             value = ""
-                        if col_name in ['real working days', 'days worked', 'ABSENCE', 'HALF DAYS', 'UNDER 9H', 'NO LUNCH', 'ENTRY > 10H', 'ENTRY > 8H']:
+                        if col_name in ['real working hours', 'hours worked', 'ABSENCE', 'HALF DAYS', 'UNDER 9H', 'NO LUNCH', 'ENTRY > 10H', 'ENTRY > 8H']:
                             if value == 0: 
                                 value = 0
                         elif col_name in ['AVG LUNCH TIME', 'Balance of hours worked', 'TOTAL HOURS WORKED']:
@@ -730,14 +797,16 @@ def process_tap_monthly_analysis(input_dir, output_dir):
             for i in range(num_cols):
                 if i == 0:
                     worksheet.set_column(i, i, 20)
-                elif i in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
+                elif i == 1:  # STARTING DAY
+                    worksheet.set_column(i, i, 12)
+                elif i in [2, 3, 4, 5, 6, 7, 8, 9, 10]:
                     worksheet.set_column(i, i, 10)
-                elif i in [10, 11, 12]:
+                elif i in [11, 12, 13]:
                     worksheet.set_column(i, i, 14)
                 else:
                     worksheet.set_column(i, i, 12)
 
-        print(f"\nSUCCESS! Monthly TAP report generated: {output_path}")
+        print(f"\nSUCCESS! Monthly Production report generated: {output_path}")
         return output_path
 
     except Exception as e:
@@ -751,9 +820,9 @@ def main():
         print("Folder not found.")
         return
 
-    output = process_tap_monthly_analysis(FOLDER_PATH, FOLDER_PATH)
+    output = process_production_monthly_analysis(FOLDER_PATH, FOLDER_PATH)
     if output:
-        print(f"TAP Report generated: {output}")
+        print(f"Production Report generated: {output}")
 
 if __name__ == "__main__":
     main()
