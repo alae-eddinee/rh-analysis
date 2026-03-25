@@ -202,7 +202,7 @@ def extract_data(file_path):
             cell_0 = row[0]
             val_0 = str(cell_0.value).strip() if cell_0.value else ''
 
-            if 'SERVICE / SECTION :' in val_0 or 'NOM :' in val_0:
+            if 'SERVICE / SECTION :' in val_0 or val_0.upper().startswith('NOM :'):
                 valid_records = process_employee_buffer(current_employee)
                 all_records.extend(valid_records)
 
@@ -213,8 +213,8 @@ def extract_data(file_path):
                     'matricule': '',
                     'records': []
                 }
-            elif 'NOM :' in val_0:
-                raw_name = val_0.replace('NOM :', '').strip()
+            elif val_0.upper().startswith('NOM :'):
+                raw_name = val_0.split(':', 1)[1].strip() if ':' in val_0 else val_0
                 current_employee = {
                     'service': current_employee.get('service', ''),
                     'name': clean_name_string(raw_name), 
@@ -241,6 +241,7 @@ def extract_data(file_path):
                 scan_count = 0
 
                 is_saturday = val_0.lower().startswith('sa')
+                is_sunday = val_0.lower().startswith('di')
                 is_ramadan = is_ramadan_date(date_obj)
 
                 if "JOUR FERIE" in row_text_upper:

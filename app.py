@@ -20,6 +20,7 @@ def load_module_from_path(module_name, file_path):
 # Load Bureau analysis scripts (8h/day - standard office workers)
 daily_script = load_module_from_path("bureau_daily_analysis", os.path.join(BASE_DIR, "analysis_bureau_daily.py"))
 monthly_script = load_module_from_path("bureau_monthly_analysis", os.path.join(BASE_DIR, "analysis_bureau_monthly.py"))
+graph_script = load_module_from_path("late_arrivals_graph", os.path.join(BASE_DIR, "late_arrivals_graph.py"))
 
 # Load Production analysis scripts (9h/day - workers with codes 130, 131, 140, 141)
 prod_daily_script = load_module_from_path("production_daily_analysis", os.path.join(BASE_DIR, "analysis_production_daily.py"))
