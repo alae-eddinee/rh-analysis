@@ -71,8 +71,8 @@ graph_script = load_module_from_path("late_arrivals_graph", os.path.join(BASE_DI
 prod_daily_script = load_module_from_path("production_daily_analysis", os.path.join(BASE_DIR, "analysis_production_daily.py"))
 prod_monthly_script = load_module_from_path("production_monthly_analysis", os.path.join(BASE_DIR, "analysis_production_monthly.py"))
 
-# Load Annual Pivot analysis script
-annual_pivot_script = load_module_from_path("pointage_pivot", os.path.join(BASE_DIR, "pointage_pivot.py"))
+# Load Annual Pivot analysis script (V2 with correct calculations)
+annual_pivot_script = load_module_from_path("pointage_pivot_v2", os.path.join(BASE_DIR, "pointage_pivot_V2.py"))
 
 # --- UTILS ---
 def reset_dirs():
@@ -371,7 +371,7 @@ with tab_annual:
             files_found = False
             if os.path.exists(TEMP_OUTPUT_DIR):
                 for f in os.listdir(TEMP_OUTPUT_DIR):
-                    if f.endswith(".xlsx") and not f.startswith("~$") and "ANNUAL_PIVOT" in f:
+                    if f.endswith(".xlsx") and not f.startswith("~$") and ("ANNUAL_PIVOT" in f or "Annual_Pivot" in f):
                         files_found = True
                         file_path = os.path.join(TEMP_OUTPUT_DIR, f)
                         with open(file_path, "rb") as file:
