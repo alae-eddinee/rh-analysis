@@ -3,11 +3,60 @@ import os
 import shutil
 import importlib.util
 import sys
+from datetime import datetime
+from supabase import create_client, Client
+from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_INPUT_DIR = os.path.join(BASE_DIR, "temp_input")
 TEMP_OUTPUT_DIR = os.path.join(BASE_DIR, "temp_output")
+
+# Load environment variables from .env file
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+# Supabase configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "RH-Data")
+
+# Initialize Supabase client if credentials are available
+supabase_client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        st.warning(f"Erreur connexion Supabase: {e}")
+
+# --- SUPABASE UPLOAD FUNCTION ---
+def upload_to_supabase(file_path, bucket_name=SUPABASE_BUCKET):
+    """Upload a file to Supabase Storage."""
+    if not supabase_client:
+        return False, "Supabase client not initialized"
+    
+    if not os.path.exists(file_path):
+        return False, f"File not found: {file_path}"
+    
+    try:
+        # Add timestamp to filename to avoid duplicates
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        original_name = os.path.basename(file_path)
+        name, ext = os.path.splitext(original_name)
+        new_filename = f"{name}_{timestamp}{ext}"
+        
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+        
+        # Upload file to Supabase Storage
+        response = supabase_client.storage.from_(bucket_name).upload(
+            new_filename,
+            file_content,
+            file_options={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+        )
+        
+        return True, new_filename
+    except Exception as e:
+        return False, str(e)
 
 # --- IMPORT FUNCTIONS DYNAMICALLY ---
 def load_module_from_path(module_name, file_path):
@@ -118,6 +167,20 @@ with tab_bureau:
                 st.error(f"Erreur Graphique: {e}")
             progress_bar.progress(90)
 
+            status_text.text("Sauvegarde sur Supabase...")
+            if daily_output and os.path.exists(daily_output):
+                success, msg = upload_to_supabase(daily_output)
+                if not success:
+                    st.error(f"Erreur sauvegarde Supabase (daily): {msg}")
+            if monthly_output and os.path.exists(monthly_output):
+                success, msg = upload_to_supabase(monthly_output)
+                if not success:
+                    st.error(f"Erreur sauvegarde Supabase (monthly): {msg}")
+            if graph_output and os.path.exists(graph_output):
+                success, msg = upload_to_supabase(graph_output)
+                if not success:
+                    st.error(f"Erreur sauvegarde Supabase (graph): {msg}")
+
             status_text.text("Finalisation...")
             progress_bar.progress(100)
             
@@ -214,6 +277,16 @@ with tab_production:
                 import traceback
                 st.error(f"Détails: {traceback.format_exc()}")
             progress_bar.progress(90)
+
+            status_text.text("Sauvegarde sur Supabase...")
+            if prod_daily_output and os.path.exists(prod_daily_output):
+                success, msg = upload_to_supabase(prod_daily_output)
+                if not success:
+                    st.error(f"Erreur sauvegarde Supabase (prod daily): {msg}")
+            if prod_monthly_output and os.path.exists(prod_monthly_output):
+                success, msg = upload_to_supabase(prod_monthly_output)
+                if not success:
+                    st.error(f"Erreur sauvegarde Supabase (prod monthly): {msg}")
 
             status_text.text("Finalisation...")
             progress_bar.progress(100)

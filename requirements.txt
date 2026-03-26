@@ -4,3 +4,5 @@ openpyxl
 xlrd
 xlsxwriter
 matplotlib
+supabase
+python-dotenv
