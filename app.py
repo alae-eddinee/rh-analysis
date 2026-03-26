@@ -5,20 +5,16 @@ import importlib.util
 import sys
 from datetime import datetime
 from supabase import create_client, Client
-from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_INPUT_DIR = os.path.join(BASE_DIR, "temp_input")
 TEMP_OUTPUT_DIR = os.path.join(BASE_DIR, "temp_output")
 
-# Load environment variables from .env file
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
-# Supabase configuration
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "RH-Data")
+# Supabase configuration from Streamlit secrets
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+SUPABASE_BUCKET = st.secrets.get("SUPABASE_BUCKET", "RH-Data")
 
 # Initialize Supabase client if credentials are available
 supabase_client = None
