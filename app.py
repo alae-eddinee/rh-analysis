@@ -71,6 +71,9 @@ graph_script = load_module_from_path("late_arrivals_graph", os.path.join(BASE_DI
 prod_daily_script = load_module_from_path("production_daily_analysis", os.path.join(BASE_DIR, "analysis_production_daily.py"))
 prod_monthly_script = load_module_from_path("production_monthly_analysis", os.path.join(BASE_DIR, "analysis_production_monthly.py"))
 
+# Load Annual Pivot analysis script
+annual_pivot_script = load_module_from_path("pointage_pivot", os.path.join(BASE_DIR, "pointage_pivot.py"))
+
 # --- UTILS ---
 def reset_dirs():
     """Réinitialise les dossiers temporaires."""
@@ -92,7 +95,7 @@ Sélectionnez le type d'analyse, téléversez vos fichiers Excel et générez le
 """)
 
 # Create tabs for different analysis types
-tab_bureau, tab_production = st.tabs(["📋 Analyse Bureau", "🔧 Analyse Production (9h)"])
+tab_bureau, tab_production, tab_annual = st.tabs(["📋 Analyse Bureau", "🔧 Analyse Production (9h)", "📊 Pivot Annuel"])
 
 # --- TAB 1: BUREAU ANALYSIS ---
 with tab_bureau:
@@ -306,5 +309,79 @@ with tab_production:
                             )
             else:
                 st.info("Aucun rapport Excel Production trouvé dans le dossier de sortie.")
+
+# --- TAB 3: ANNUAL PIVOT ANALYSIS ---
+with tab_annual:
+    st.header("📊 Analyse Pivot Annuel")
+    st.markdown("""
+    **Pour l'analyse annuelle des heures travaillées :**
+    - Génère un tableau pivot par employé
+    - Heures travaillées par mois
+    - Jours d'absence par mois
+    - Totaux annuels
+    - Fichiers Production uniquement
+    """)
+    
+    uploaded_files_annual = st.file_uploader(
+        "Téléversez les fichiers Excel pour l'analyse Pivot Annuelle (.xlsx, .xls)",
+        type=['xlsx', '.xls'],
+        accept_multiple_files=True,
+        key="annual_uploader"
+    )
+    
+    if st.button("🚀 Lancer l'Analyse Pivot Annuel", type="primary", key="annual_button"):
+        if not uploaded_files_annual:
+            st.warning("Veuillez d'abord téléverser des fichiers.")
+        else:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            status_text.text("Préparation de l'environnement...")
+            reset_dirs()
+            progress_bar.progress(10)
+
+            status_text.text(f"Sauvegarde de {len(uploaded_files_annual)} fichiers...")
+            for uploaded_file in uploaded_files_annual:
+                file_path = os.path.join(TEMP_INPUT_DIR, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+            progress_bar.progress(30)
+
+            status_text.text("Exécution de l'analyse Pivot Annuel...")
+            annual_output = None
+            try:
+                annual_output = annual_pivot_script.process_annual_pivot(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
+                if annual_output:
+                    st.success(f"✅ Analyse Pivot Annuel générée : {os.path.basename(annual_output)}")
+                else:
+                    st.warning("⚠️ L'analyse Pivot Annuel n'a rien généré (vérifiez les données Production).")
+            except Exception as e:
+                st.error(f"Erreur Analyse Pivot Annuel: {e}")
+                import traceback
+                st.error(f"Détails: {traceback.format_exc()}")
+            progress_bar.progress(90)
+
+            status_text.text("Finalisation...")
+            progress_bar.progress(100)
+            
+            st.divider()
+            st.header("📂 Résultats Analyse Pivot Annuel")
+
+            st.subheader("Rapport Excel Pivot Annuel")
+            files_found = False
+            if os.path.exists(TEMP_OUTPUT_DIR):
+                for f in os.listdir(TEMP_OUTPUT_DIR):
+                    if f.endswith(".xlsx") and not f.startswith("~$") and "ANNUAL_PIVOT" in f:
+                        files_found = True
+                        file_path = os.path.join(TEMP_OUTPUT_DIR, f)
+                        with open(file_path, "rb") as file:
+                            st.download_button(
+                                label=f"⬇️ Télécharger {f}",
+                                data=file,
+                                file_name=f,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+            if not files_found:
+                st.info("Aucun rapport Pivot Annuel trouvé.")
 
 st.sidebar.info("Application RH - Analyse Bureau & Production")
