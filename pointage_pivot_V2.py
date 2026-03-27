@@ -147,10 +147,6 @@ def extract_employees(rows):
                 except ValueError:
                     continue
 
-                hj_code = str(c1).strip() if c1 else ""
-                if hj_code in SKIP_HJ:
-                    continue
-
                 pointage = c2
                 first, last = parse_first_last(pointage)
                 hours = calc_hours(first, last)
@@ -158,8 +154,15 @@ def extract_employees(rows):
                 is_absence_marked = isinstance(pointage, str) and "absence" in pointage.lower()
                 has_work = bool(first) and not is_absence_marked
 
-                if has_work and (current_emp["first_date"] is None or dt < current_emp["first_date"]):
+                # Track first date from ANY valid timestamp (before HJ filtering)
+                # to get the actual first badge scan overall
+                if first and (current_emp["first_date"] is None or dt < current_emp["first_date"]):
                     current_emp["first_date"] = dt
+
+                # Skip HJ codes for calculations, but first_date is already tracked above
+                hj_code = str(c1).strip() if c1 else ""
+                if hj_code in SKIP_HJ:
+                    continue
 
                 current_emp["days"].append({
                     "date": dt,
