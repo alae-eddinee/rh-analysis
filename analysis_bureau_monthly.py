@@ -566,7 +566,11 @@ def process_monthly_analysis(input_dir, output_dir):
         # Créer un nom de fichier dynamique basé sur la période analysée
         dynamic_filename = f"Monthly_Global_Analysis_{real_start_day:02d}-{month_num}-{year_num}_A_{real_end_day:02d}-{month_num}-{year_num}.xlsx"
         output_path = os.path.join(output_dir, dynamic_filename)
-        header_text = f"Analyse Mensuelle - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
+        
+        # Use actual calculated dates for the header to handle multi-month periods correctly
+        header_start = final_min_date.strftime('%d/%m/%Y')
+        header_end = final_max_date.strftime('%d/%m/%Y')
+        header_text = f"Analyse Mensuelle - Période : {header_start} au {header_end}"
 
     else:
         print("Could not detect valid dates. Exiting.")

@@ -225,11 +225,25 @@ def wcell(ws, r, c, v, font=None, fill=None, align=None, border=None, nf=None):
     return cell
 
 
-def write_pivot_sheet(ws, data, sheet_title, year=2025):
+def write_pivot_sheet(ws, data, sheet_title, year=None):
     FIXED = 3
     MONTH_COLS = 3
     TOTAL_COLS = 3
     TOTAL_WIDTH = FIXED + 12 * MONTH_COLS + TOTAL_COLS
+
+    # Extract year from data if not provided
+    if year is None and data:
+        for emp in data:
+            if emp.get("first_date"):
+                year = emp["first_date"].year
+                break
+            # Check monthly data for year
+            for mo in range(1, 13):
+                if emp.get("monthly", {}).get(mo, {}).get("hours", 0) > 0:
+                    # Try to find year from any day data if available
+                    pass
+    if year is None:
+        year = datetime.now().year
 
     wf  = Font(color=C_WHITE, bold=True, size=10)
     df  = Font(color="000000", size=9)
