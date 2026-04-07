@@ -1,0 +1,251 @@
+[
+  {
+    "matricule": "MD0268",
+    "nom": "AIT OBIDAT",
+    "prenom": "MAROUANE",
+    "responsable": "Bennis Adnan",
+    "service": "export",
+    "poste": "Chargé Exp",
+    "last_seen": "2026-02-01"
+  },
+  {
+    "matricule": "MD1282",
+    "nom": "AIT-OUSFAI",
+    "prenom": "FATIMA",
+    "responsable": "Bennis Adnan",
+    "service": "recouvrement",
+    "poste": "Assistant"
+  },
+  {
+    "matricule": "MD1826",
+    "nom": "ASSAKKOUR",
+    "prenom": "FOUZIA",
+    "responsable": "Bennis Adnan",
+    "service": "export",
+    "poste": "Chargé Export"
+  },
+  {
+    "matricule": "MD0311",
+    "nom": "BELFALAH",
+    "prenom": "AMINE",
+    "responsable": "Bennis Adnan",
+    "service": "commercial",
+    "poste": "Assist-Com"
+  },
+  {
+    "matricule": "MD1842",
+    "nom": "DAHANE",
+    "prenom": "ALAE-EDDINE",
+    "responsable": "Bennis Adnan",
+    "service": "commercial",
+    "poste": "Big data"
+  },
+  {
+    "matricule": "MB0631",
+    "nom": "EL MAMOURI",
+    "prenom": "AYOUB",
+    "responsable": "Bennis Adnan",
+    "service": "informatique",
+    "poste": "Informatiq"
+  },
+  {
+    "matricule": "MD1451",
+    "nom": "EL OUARDI",
+    "prenom": "BILAL",
+    "responsable": "Bennis Adnan",
+    "service": "commercial",
+    "poste": "Chargé Com"
+  },
+  {
+    "matricule": "MB5206",
+    "nom": "EL YOUSSRI",
+    "prenom": "MOHAMMED CHARAF",
+    "responsable": "Bennis Adnan",
+    "service": "commercial",
+    "poste": "Repres-Com"
+  },
+  {
+    "matricule": "MD1040",
+    "nom": "ELASLI",
+    "prenom": "BTISSAM",
+    "responsable": "Bennis Adnan",
+    "service": "import",
+    "poste": "Chargé Log"
+  },
+  {
+    "matricule": "MD1008",
+    "nom": "EZ-ZYN",
+    "prenom": "HAFSA",
+    "responsable": "Bennis Adnan",
+    "service": "commercial",
+    "poste": "Chargé de"
+  },
+  {
+    "matricule": "MI0537",
+    "nom": "LAMRABTI",
+    "prenom": "YASSINE",
+    "responsable": "Bennis Adnan",
+    "service": "export",
+    "poste": "Chargé Com"
+  },
+  {
+    "matricule": "MC4444",
+    "nom": "SAOUD",
+    "prenom": "NASRALLAH",
+    "responsable": "Bennis Adnan",
+    "service": "commercial",
+    "poste": "Repres-Com"
+  },
+  {
+    "matricule": "MD0371",
+    "nom": "TOUNCHIBIN",
+    "prenom": "LEILA",
+    "responsable": "Bennis Adnan",
+    "service": "recouvrement",
+    "poste": "GMS"
+  },
+  {
+    "matricule": "MD1279",
+    "nom": "ASBAYOU",
+    "prenom": "ASMAE",
+    "responsable": "Bennis khalid",
+    "service": "Tresorerie",
+    "poste": "Chargé Trésorie"
+  },
+  {
+    "matricule": "MB0031",
+    "nom": "BADROUN",
+    "prenom": "RACHID",
+    "responsable": "Bennis khalid",
+    "service": "ressources humains",
+    "poste": "Chargé RH"
+  },
+  {
+    "matricule": "MD1828",
+    "nom": "BELQADI",
+    "prenom": "SAFA",
+    "responsable": "Bennis khalid",
+    "service": "informatique",
+    "poste": "Big data"
+  },
+  {
+    "matricule": "MD1730",
+    "nom": "BOULAFDAM",
+    "prenom": "FATIMA-ZAHRA",
+    "responsable": "Bennis khalid",
+    "service": "comptabilite",
+    "poste": "Comptable"
+  },
+  {
+    "matricule": "MD1871",
+    "nom": "EL JAKOUNE",
+    "prenom": "ABDOULHAKIM",
+    "responsable": "Bennis khalid",
+    "service": "comptabilite",
+    "poste": "Comptable"
+  },
+  {
+    "matricule": "MD0282",
+    "nom": "IHSSANE",
+    "prenom": "OUALID",
+    "responsable": "Bennis khalid",
+    "service": "informatique",
+    "poste": "Chargé Ach"
+  },
+  {
+    "matricule": "MD1644",
+    "nom": "MADANI",
+    "prenom": "MERYEM",
+    "responsable": "Bennis khalid",
+    "service": "Methode",
+    "poste": "Methode"
+  },
+  {
+    "matricule": "MD0742",
+    "nom": "MESKINI",
+    "prenom": "NOURA",
+    "responsable": "Bennis khalid",
+    "service": "comptabilite",
+    "poste": "Attaché Di"
+  },
+  {
+    "matricule": "MD1571",
+    "nom": "SEDDATI",
+    "prenom": "MOHAMED",
+    "responsable": "Bennis khalid",
+    "service": "comptabilite",
+    "poste": "Comptable"
+  },
+  {
+    "matricule": "MC0734",
+    "nom": "SEMLALI",
+    "prenom": "HAMZA",
+    "responsable": "Bennis khalid",
+    "service": "Methode",
+    "poste": "Opérateur"
+  },
+  {
+    "matricule": "MD0745",
+    "nom": "TAHOUM",
+    "prenom": "SOLTANA",
+    "responsable": "Bennis khalid",
+    "service": "ressources humains",
+    "poste": "Chargé RH"
+  },
+  {
+    "matricule": "MB0316",
+    "nom": "TAIBA",
+    "prenom": "ZOUHAIR",
+    "responsable": "Bennis khalid",
+    "service": "informatique",
+    "poste": "Attaché Di"
+  },
+  {
+    "matricule": "MD1632",
+    "nom": "ALLAM",
+    "prenom": "SAAD",
+    "responsable": "Bennis Younes",
+    "service": "Infographie",
+    "poste": "Chargé Infographie"
+  },
+  {
+    "matricule": "MD1376",
+    "nom": "EL AIDOUNI",
+    "prenom": "HIND",
+    "responsable": "Bennis Younes",
+    "service": "recouvrement",
+    "poste": "Chargé Inf"
+  },
+  {
+    "matricule": "MB4663",
+    "nom": "EZ-ZAFRANI",
+    "prenom": "REDOUANE",
+    "responsable": "Bennis Younes",
+    "service": "achat",
+    "poste": "Chargé Sto"
+  },
+  {
+    "matricule": "MB1220",
+    "nom": "HARMOUCH",
+    "prenom": "FADOUA",
+    "responsable": "Bennis Younes",
+    "service": "recouvrement",
+    "poste": "Force de V"
+  },
+  {
+    "matricule": "MR0002",
+    "nom": "HMAMOU",
+    "prenom": "HAMID",
+    "responsable": "Bennis Younes",
+    "service": "Infographie",
+    "poste": "Chargé Inf"
+  },
+  {
+    "matricule": "MD1386",
+    "nom": "ZOUHRI",
+    "prenom": "ZAINAB",
+    "responsable": "Bennis Younes",
+    "service": "Methode",
+    "poste": "Assist ADV"
+  }
+]

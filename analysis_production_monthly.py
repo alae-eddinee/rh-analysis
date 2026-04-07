@@ -40,48 +40,48 @@ def clean_name_string(name):
     if not name:
         return ""
     name = str(name)
-    # Only remove problematic whitespace characters but preserve original format
     name = name.replace('\xa0', ' ').replace('\t', ' ').replace('\n', ' ')
-    # Don't uppercase, don't normalize spaces - keep original name
     return name.strip()
 
 def parse_scan_times(scan_str):
-    """Parses scan string to count scans and calculate duration."""
+    """Parses scan string to count scans."""
     if scan_str is None:
         return [], 0
     scan_str = str(scan_str)
     times = re.findall(r'\d{1,2}:\d{2}', scan_str)
     return times, len(times)
 
-def calculate_hours_from_scans(times):
-    """Calculates total worked hours from a list of 'HH:MM' strings."""
-    if not times:
-        return 0.0
-    
-    total_seconds = 0
-    for i in range(0, len(times) - 1, 2):
-        try:
-            t_in = datetime.strptime(times[i], '%H:%M')
-            t_out = datetime.strptime(times[i+1], '%H:%M')
-            if t_out < t_in: t_out += timedelta(days=1)
-            total_seconds += (t_out - t_in).total_seconds()
-        except:
-            continue
-            
-    return round(total_seconds / 3600, 2)
+def parse_tps_eff(tps_eff_val):
+    """
+    Parses the 'Tps Eff' column (col 4) from the pointage file.
+    Returns hours as float, or None if unparseable/zero.
+    Using Tps Eff ensures accurate hours matching the source system,
+    which auto-deducts lunch for certain contract types (e.g. HJ 140).
+    """
+    if tps_eff_val is None:
+        return None
+    s = str(tps_eff_val).strip()
+    m = re.match(r'^(\d+):(\d{2})$', s)
+    if m:
+        val = int(m.group(1)) + int(m.group(2)) / 60.0
+        return val if val > 0 else None
+    try:
+        f = float(s)
+        if 0.0 < f < 5.0:
+            return round(f * 24, 4)
+    except ValueError:
+        pass
+    return None
 
-def calculate_lunch_minutes(times, is_friday=False):
+def calculate_lunch_minutes(times):
     """Calculates the duration of the lunch break (gap between scan 2 and 3)."""
     if not times or len(times) < 4:
         return 0
-    
     try:
         t_out_lunch = datetime.strptime(times[1], '%H:%M')
-        t_in_lunch = datetime.strptime(times[2], '%H:%M')
-        
+        t_in_lunch  = datetime.strptime(times[2], '%H:%M')
         if t_in_lunch < t_out_lunch: 
             t_in_lunch += timedelta(days=1)
-            
         diff_seconds = (t_in_lunch - t_out_lunch).total_seconds()
         return diff_seconds / 60 
     except:
@@ -139,7 +139,6 @@ def process_employee_buffer(employee_data):
             hj = raw_hj.split('.')[0].strip()
         else:
             hj = raw_hj.strip()
-            
         if hj in PRODUCTION_CODES:
             prod_matches += 1
     
@@ -182,17 +181,11 @@ def extract_date_from_string(date_str):
             return None
     return None
 
-def is_friday(date_obj):
+def is_friday_date(date_obj):
     """Check if date is Friday (weekday 4)."""
     if date_obj is None:
         return False
     return date_obj.weekday() == 4
-
-def is_saturday(date_obj):
-    """Check if date is Saturday (weekday 5)."""
-    if date_obj is None:
-        return False
-    return date_obj.weekday() == 5
 
 def extract_data(file_path):
     all_records = []
@@ -228,8 +221,11 @@ def extract_data(file_path):
             elif 'MATRICULE :' in val_0:
                 current_employee['matricule'] = val_0.replace('MATRICULE :', '').strip()
             elif any(val_0.startswith(day) for day in DAYS_FRENCH) and any(char.isdigit() for char in val_0):
-                hj_val = row[1].value if len(row) > 1 else ''
+                hj_val      = row[1].value if len(row) > 1 else ''
                 raw_scan_val = row[2].value if len(row) > 2 else ''
+                # FIX: Read Tps Eff (col4) for accurate hours
+                tps_eff_val = row[4].value if len(row) > 4 else None
+
                 row_text_upper = (str(val_0) + " " + str(raw_scan_val)).upper()
                 date_obj = extract_date_from_string(val_0)
                 
@@ -241,38 +237,47 @@ def extract_data(file_path):
                 daily_target_for_worked_day = 0.0 
                 daily_lunch_minutes = 0
                 has_lunch_break = 0 
-                no_lunch_penalty = 0  # 1h penalty for missing lunch scan
                 times_list = []
                 scan_count = 0
 
                 is_sat = val_0.lower().startswith('sa')
-                is_fri = is_friday(date_obj)
+                is_fri = is_friday_date(date_obj)
 
                 if "JOUR FERIE" in row_text_upper:
                     is_holiday = 1
                 elif "CONGE" in row_text_upper:
                     is_leave = 1
-                elif "ABSENCE NON JUSTIFIÉE-" in row_text_upper:
-                    is_unjustified_absence = 1 
+                elif "ABSENCE AUTORIS" in row_text_upper:
+                    # FIX: Treat authorized absence as leave
+                    is_leave = 1
+                elif "ABSENCE NON JUSTIFI" in row_text_upper:
+                    is_unjustified_absence = 1
                 else:
                     times_list, scan_count = parse_scan_times(raw_scan_val)
-                    hours_worked = calculate_hours_from_scans(times_list)
+
+                    # FIX: Use Tps Eff for accurate hours; fallback to raw scan calculation
+                    tps_eff_hours = parse_tps_eff(tps_eff_val)
+                    if tps_eff_hours is not None:
+                        hours_worked = round(tps_eff_hours, 2)
+                    else:
+                        total_sec = 0
+                        for i in range(0, len(times_list) - 1, 2):
+                            try:
+                                t_in  = datetime.strptime(times_list[i], '%H:%M')
+                                t_out = datetime.strptime(times_list[i+1], '%H:%M')
+                                if t_out < t_in: t_out += timedelta(days=1)
+                                total_sec += (t_out - t_in).total_seconds()
+                            except:
+                                continue
+                        hours_worked = round(total_sec / 3600, 2)
                     
-                    # Production: Friday lunch is 1pm-2:30pm (90 min), other days regular
                     if len(times_list) >= 4 and not is_sat:
-                        daily_lunch_minutes = calculate_lunch_minutes(times_list, is_friday=is_fri)
+                        daily_lunch_minutes = calculate_lunch_minutes(times_list)
                         has_lunch_break = 1
-                    elif not is_sat and len(times_list) > 0:
-                        # No lunch break scanned - apply 1h penalty
-                        no_lunch_penalty = 1
                     
                     if hours_worked > 0:
                         is_day_worked = 1
-                        # Production: 9h workday (8am-6pm with lunch), Saturday 5h
-                        if is_sat:
-                            daily_target_for_worked_day = SATURDAY_HOURS
-                        else:
-                            daily_target_for_worked_day = WEEKDAY_HOURS
+                        daily_target_for_worked_day = SATURDAY_HOURS if is_sat else WEEKDAY_HOURS
 
                 if date_obj:
                     day_numeric = date_obj.day
@@ -295,7 +300,6 @@ def extract_data(file_path):
                         'daily_target_for_worked_day': daily_target_for_worked_day,
                         'daily_lunch_minutes': daily_lunch_minutes,
                         'has_lunch_break': has_lunch_break,
-                        'no_lunch_penalty': no_lunch_penalty,  # Track lunch penalty
                         'month_num': month_num,
                         'year_num': year_num,
                         'is_friday': is_fri,
@@ -308,92 +312,76 @@ def extract_data(file_path):
     
     except Exception as e:
         print(f"Error opening {os.path.basename(file_path)}: {e}")
+        import traceback
+        print(traceback.format_exc())
         return []
     
     return all_records
 
 def analyze_record(row):
-    """Applies business rules to a single daily record for TAP workers."""
-    is_late_800 = 0
+    """Applies business rules to a single daily record for Production workers."""
+    is_late_800  = 0
     is_late_1000 = 0
-    no_lunch = 0
-    is_under = 0
+    no_lunch  = 0
+    is_under  = 0
     is_half_day = 0
 
     if row['is_leave'] or row['is_holiday']:
-        return 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0
 
     times = row['times_list']
     if not times: 
-        return 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0
 
     first_scan = datetime.strptime(times[0], '%H:%M')
     
-    # --- TIME LIMITS ---
-    limit_800 = first_scan.replace(hour=8, minute=0, second=0)
+    limit_800  = first_scan.replace(hour=8,  minute=0, second=0)
     limit_1000 = first_scan.replace(hour=10, minute=0, second=0)
     limit_1300 = first_scan.replace(hour=13, minute=0, second=0)
 
-    # --- LATENESS LOGIC ---
     if first_scan > limit_1000:
         is_late_1000 = 1
-        is_late_800 = 0
+        is_late_800  = 0
     elif first_scan > limit_800:
         is_late_1000 = 0
-        is_late_800 = 1
+        is_late_800  = 1
 
     is_sat = row.get('is_saturday', False)
-    is_fri = row.get('is_friday', False)
     
-    # --- NO LUNCH LOGIC ---
-    # TAP: Check if lunch break exists (at least 4 scans)
     if is_sat:
         no_lunch = 0
     else:
         no_lunch = 1 if len(times) < 4 else 0
 
-    # --- TARGET HOURS ---
-    # Production: 9h for weekdays, 5h for Saturdays
-    if is_sat:
-        target = SATURDAY_HOURS
-    else:
-        target = WEEKDAY_HOURS
-    
+    target = SATURDAY_HOURS if is_sat else WEEKDAY_HOURS
     is_under = 1 if row['hours_worked'] > 0 and row['hours_worked'] < target else 0
 
-    # --- HALF DAY LOGIC ---
-    # Production: Half day if worked less than 8h (for 9h target) or morning only/afternoon only
+    # Half day: entered after 13:00 OR left before 13:00 with < 8h worked
     if row['is_day_worked'] and not is_sat and len(times) >= 2:
         try:
             t_entry = datetime.strptime(times[0], '%H:%M')
-            t_exit = datetime.strptime(times[-1], '%H:%M')
+            t_exit  = datetime.strptime(times[-1], '%H:%M')
             if t_exit < t_entry: t_exit += timedelta(days=1)
             
-            # Afternoon only (entered after 13:00)
             cond_afternoon = (t_entry >= limit_1300)
-            
-            # Morning only (left before 13:00 and worked less than 8h)
-            cond_morning = (t_exit <= limit_1300) and (row['hours_worked'] < 8.0)
+            cond_morning   = (t_exit <= limit_1300) and (row['hours_worked'] < 8.0)
             
             if cond_afternoon or cond_morning:
                 is_half_day = 1
         except:
             pass 
 
-    # Check for no lunch penalty
-    no_lunch_penalty = row.get('no_lunch_penalty', 0)
-
-    return is_late_800, is_late_1000, no_lunch, is_under, is_half_day, no_lunch_penalty
+    return is_late_800, is_late_1000, no_lunch, is_under, is_half_day
 
 def calculate_weighted_business_days_in_range(start_date, end_date):
     """Calculate weighted business days: weekdays = 1.0, Saturdays = 0.5"""
     current = start_date
-    weighted_days = 0
+    weighted_days = 0.0
     while current <= end_date:
         wd = current.weekday()
-        if wd == 5:  # Saturday
+        if wd == 5:
             weighted_days += 0.5
-        elif wd != 6:  # Monday-Friday (not Sunday)
+        elif wd != 6:
             weighted_days += 1.0
         current += timedelta(days=1)
     return weighted_days
@@ -401,7 +389,7 @@ def calculate_weighted_business_days_in_range(start_date, end_date):
 def minutes_to_hhmm(mins):
     if pd.isna(mins) or mins == 0:
         return ""
-    hours = int(mins // 60)
+    hours   = int(mins // 60)
     minutes = int(round(mins % 60))
     if minutes == 60:
         hours += 1
@@ -411,16 +399,13 @@ def minutes_to_hhmm(mins):
 def decimal_hours_to_hhmm(decimal_hours):
     if pd.isna(decimal_hours) or decimal_hours == 0:
         return "00:00"
-    
-    is_negative = decimal_hours < 0
+    is_negative   = decimal_hours < 0
     minutes_total = abs(decimal_hours) * 60
-    hours = int(minutes_total // 60)
+    hours   = int(minutes_total // 60)
     minutes = int(round(minutes_total % 60))
-    
     if minutes == 60:
         hours += 1
         minutes = 0
-        
     time_str = f"{hours:02}:{minutes:02}"
     return f"-{time_str}" if is_negative else time_str
 
@@ -449,7 +434,7 @@ def process_production_monthly_analysis(input_dir, output_dir):
     # --- CHRONOLOGICAL DETECTION ---
     if 'day_numeric' in df.columns and not df.empty:
         month_num = df['month_num'].iloc[0] if 'month_num' in df.columns else '01'
-        year_num = df['year_num'].iloc[0] if 'year_num' in df.columns else '2026'
+        year_num  = df['year_num'].iloc[0]  if 'year_num'  in df.columns else '2026'
         
         unique_days_in_order = []
         seen = set()
@@ -459,7 +444,7 @@ def process_production_monthly_analysis(input_dir, output_dir):
                 seen.add(d)
 
         real_start_day = unique_days_in_order[0]
-        real_end_day = unique_days_in_order[-1]
+        real_end_day   = unique_days_in_order[-1]
         
         has_transition = False
         pivot_index = -1
@@ -475,7 +460,7 @@ def process_production_monthly_analysis(input_dir, output_dir):
         target_report_day = real_end_day
         
         last_day_records = df[df['day_numeric'] == target_report_day]
-        total_last_day = len(last_day_records)
+        total_last_day   = len(last_day_records)
         incomplete_count = len(last_day_records[last_day_records['scan_count'] <= 1])
         
         if total_last_day > 0 and (incomplete_count / total_last_day) > 0.5:
@@ -501,14 +486,13 @@ def process_production_monthly_analysis(input_dir, output_dir):
         else:
             final_min_date = datetime(int(year_num), int(month_num), real_start_day)
             final_max_date = datetime(int(year_num), int(month_num), real_end_day)
-            
             if has_transition:
                 if month_num == '12':
                     next_month_num = '01'
-                    next_year_num = str(int(year_num) + 1)
+                    next_year_num  = str(int(year_num) + 1)
                 else:
                     next_month_num = f"{int(month_num) + 1:02d}"
-                    next_year_num = year_num
+                    next_year_num  = year_num
                 final_max_date = datetime(int(next_year_num), int(next_month_num), real_end_day)
         
         print(f"\n--- DATE RANGE DETECTED ---")
@@ -516,21 +500,20 @@ def process_production_monthly_analysis(input_dir, output_dir):
         print(f"Last day found: {real_end_day}")
         
         if has_transition:
-            first_month_days = unique_days_in_order[:pivot_index + 1]
+            first_month_days  = unique_days_in_order[:pivot_index + 1]
             second_month_days = unique_days_in_order[pivot_index + 1:]
             total_days = len(first_month_days) + len(second_month_days)
-            print(f"Multi-month period detected: {len(first_month_days)} days + {len(second_month_days)} days")
+            print(f"Multi-month period: {len(first_month_days)} + {len(second_month_days)} days")
         else:
             total_days = len(unique_days_in_order)
         
         print(f"Total days analyzed: {total_days}")
-        print(f"Final Analysis Period: {final_min_date.strftime('%d/%m/%Y')} to {final_max_date.strftime('%d/%m/%Y')}")
         global_expected_days = calculate_weighted_business_days_in_range(final_min_date, final_max_date)
-        print(f"Theoretical Business Days (weighted) in period: {global_expected_days}")
+        print(f"Theoretical Business Days (weighted): {global_expected_days}")
         
         dynamic_filename = f"Monthly_Production_Analysis_{real_start_day:02d}-{month_num}-{year_num}_A_{real_end_day:02d}-{month_num}-{year_num}.xlsx"
-        output_path = os.path.join(output_dir, dynamic_filename)
-        header_text = f"Analyse Mensuelle Production - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
+        output_path  = os.path.join(output_dir, dynamic_filename)
+        header_text  = f"Analyse Mensuelle Production - Période : {final_min_date.strftime('%d/%m/%Y')} au {final_max_date.strftime('%d/%m/%Y')}"
 
     else:
         print("Could not detect valid dates. Exiting.")
@@ -548,53 +531,59 @@ def process_production_monthly_analysis(input_dir, output_dir):
     print("Analyzing Production metrics...")
     metrics = df.apply(analyze_record, axis=1)
     
-    df['ENTRY > 8H'] = [x[0] for x in metrics]
+    df['ENTRY > 8H']  = [x[0] for x in metrics]
     df['ENTRY > 10H'] = [x[1] for x in metrics]
-    df['NO LUNCH'] = [x[2] for x in metrics]
-    df['UNDER 9H'] = [x[3] for x in metrics]
+    df['NO LUNCH']    = [x[2] for x in metrics]
+    df['UNDER 9H']    = [x[3] for x in metrics]
     df['IS HALF DAY'] = [x[4] for x in metrics]
-    df['NO_LUNCH_PENALTY'] = [x[5] for x in metrics]
 
-    # Calculate date ranges and working days
     min_date = df['full_date'].min()
     max_date = df['full_date'].max()
     working_days = calculate_weighted_business_days_in_range(min_date, max_date)
-    date_range = (min_date, max_date)
     
-    print(f"DEBUG: Production table date range: {min_date} to {max_date}")
-    print(f"DEBUG: Production table weighted working days: {working_days}")
+    print(f"DEBUG: Production date range: {min_date} to {max_date}")
+    print(f"DEBUG: Production weighted working days: {working_days}")
 
     def generate_production_report(subset_df, table_expected_days):
         if subset_df.empty:
             return None
         
-        # Calculate starting day for each employee (first pointage date)
+        # First pointage date per employee
         starting_days = subset_df.groupby('name')['full_date'].min().reset_index()
         starting_days.columns = ['name', 'starting_day']
         
         def calc_weighted_days_worked(group):
-            weekdays = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
-            saturdays = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
-            weekday_days = len(weekdays['day_numeric'].unique())
-            saturday_days = len(saturdays['day_numeric'].unique())
-            return weekday_days + (saturday_days * 0.5)
+            weekdays  = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
+            saturdays = group[(group['day_str'].str.startswith('Sa', na=False))  & (group['is_day_worked'] == 1)]
+            return len(weekdays['day_numeric'].unique()) + len(saturdays['day_numeric'].unique()) * 0.5
         
         def calc_weighted_absence(group):
-            weekday_absences = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
-            saturday_absences = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
-            weekday_abs_count = len(weekday_absences['day_numeric'].unique())
-            saturday_abs_count = len(saturday_absences['day_numeric'].unique())
-            return weekday_abs_count + (saturday_abs_count * 0.5)
+            weekday_abs  = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
+            saturday_abs = group[(group['day_str'].str.startswith('Sa', na=False))  & (group['is_unjustified_absence'] == 1)]
+            return len(weekday_abs['day_numeric'].unique()) + len(saturday_abs['day_numeric'].unique()) * 0.5
+
+        # FIX: Weighted leave/holiday (Saturday = 0.5)
+        def calc_weighted_leave(group):
+            weekday_lv  = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_leave'] == 1)]
+            saturday_lv = group[(group['day_str'].str.startswith('Sa', na=False))  & (group['is_leave'] == 1)]
+            return len(weekday_lv) * 1.0 + len(saturday_lv) * 0.5
+
+        def calc_weighted_holiday(group):
+            weekday_hol  = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_holiday'] == 1)]
+            saturday_hol = group[(group['day_str'].str.startswith('Sa', na=False))  & (group['is_holiday'] == 1)]
+            return len(weekday_hol) * 1.0 + len(saturday_hol) * 0.5
         
-        # Calculate no lunch penalty per employee
-        lunch_penalty = subset_df.groupby('name')['NO_LUNCH_PENALTY'].sum().reset_index()
-        lunch_penalty.columns = ['name', 'lunch_penalty_hours']
-        
-        weighted_days = subset_df.groupby('name').apply(calc_weighted_days_worked).reset_index()
+        weighted_days    = subset_df.groupby('name').apply(calc_weighted_days_worked).reset_index()
         weighted_days.columns = ['name', 'weighted_days_worked']
         
         weighted_absence = subset_df.groupby('name').apply(calc_weighted_absence).reset_index()
         weighted_absence.columns = ['name', 'weighted_absence']
+
+        weighted_leave   = subset_df.groupby('name').apply(calc_weighted_leave).reset_index()
+        weighted_leave.columns = ['name', 'weighted_leave']
+
+        weighted_holiday = subset_df.groupby('name').apply(calc_weighted_holiday).reset_index()
+        weighted_holiday.columns = ['name', 'weighted_holiday']
         
         report = subset_df.groupby('name').agg({
             'is_day_worked': 'sum',
@@ -612,50 +601,37 @@ def process_production_monthly_analysis(input_dir, output_dir):
             'has_lunch_break': 'sum'
         }).reset_index()
         
-        report = report.merge(weighted_days, on='name', how='left')
+        report = report.merge(weighted_days,    on='name', how='left')
         report = report.merge(weighted_absence, on='name', how='left')
-        report = report.merge(lunch_penalty, on='name', how='left')
-        report = report.merge(starting_days, on='name', how='left')
+        report = report.merge(weighted_leave,   on='name', how='left')
+        report = report.merge(weighted_holiday, on='name', how='left')
+        report = report.merge(starting_days,    on='name', how='left')
         
         report.rename(columns={
             'name': 'Employee name',
             'weighted_days_worked': 'days worked',
             'weighted_absence': 'ABSENCE',
-            'daily_target_for_worked_day': 'TOTAL HOURS NEEDED', 
+            'daily_target_for_worked_day': 'TOTAL HOURS NEEDED',
             'hours_worked': 'TOTAL HOURS WORKED',
             'IS HALF DAY': 'HALF DAYS'
         }, inplace=True)
-        
+
         saturday_records = subset_df[subset_df['day_str'].str.startswith('Sa', na=False)]
         expected_saturdays = len(saturday_records['day_numeric'].unique())
-        
-        # Convert real working days to hours (multiply by 9 for weekdays + 5 for Saturdays)
-        # Calculate: weekdays * 9 + saturdays * 5
-        real_working_days_value = table_expected_days - report['is_leave'] - report['is_holiday']
-        
-        # For hours calculation: count weekdays and saturdays separately
-        def calc_real_working_hours(days_val):
-            # Approximate: assume 5 weekdays for every 0.5 saturday in weighted count
-            # This is a simplified calculation - assumes standard work pattern
-            sat_count = expected_saturdays
-            # Calculate weekday count from weighted total
-            weekday_count = max(0, days_val - (sat_count * 0.5))
-            return (weekday_count * WEEKDAY_HOURS) + (sat_count * SATURDAY_HOURS)
-        
-        report['real working hours'] = real_working_days_value.apply(calc_real_working_hours)
-        
-        # Convert days worked to hours
-        def calc_worked_hours(days_val):
-            # Same logic: separate weekdays and saturdays
-            sat_count = expected_saturdays
-            weekday_count = max(0, days_val - (sat_count * 0.5))
-            return (weekday_count * WEEKDAY_HOURS) + (sat_count * SATURDAY_HOURS)
-        
-        # Actually, let's use a more accurate approach - calculate based on actual days worked
+
+        # FIX: Use weighted leave/holiday so Saturday leaves count as 0.5
+        report['real working days'] = (
+            table_expected_days
+            - report['weighted_leave']
+            - report['weighted_holiday']
+        )
+        report.drop(['weighted_leave', 'weighted_holiday', 'is_leave', 'is_holiday'], axis=1, inplace=True)
+
+        # Calculate actual worked hours (weekdays × 9h + saturdays × 5h)
         def calc_days_worked_hours(group):
-            weekdays = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
-            saturdays = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
-            weekday_count = len(weekdays['day_numeric'].unique())
+            weekdays  = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
+            saturdays = group[(group['day_str'].str.startswith('Sa', na=False))  & (group['is_day_worked'] == 1)]
+            weekday_count  = len(weekdays['day_numeric'].unique())
             saturday_count = len(saturdays['day_numeric'].unique())
             return (weekday_count * WEEKDAY_HOURS) + (saturday_count * SATURDAY_HOURS)
         
@@ -664,48 +640,42 @@ def process_production_monthly_analysis(input_dir, output_dir):
         report = report.merge(worked_hours_per_employee, left_on='Employee name', right_on='name', how='left')
         if 'name' in report.columns:
             report.drop('name', axis=1, inplace=True)
-        
+
         saturday_work_by_employee = saturday_records[saturday_records['is_day_worked'] == 1].groupby('name').size().reset_index(name='saturdays_worked')
         saturday_work_by_employee['saturdays_worked'] = saturday_work_by_employee['saturdays_worked'].apply(lambda x: 1 if x > 0 else 0)
         report = report.merge(saturday_work_by_employee, left_on='Employee name', right_on='name', how='left')
         report['saturdays_worked'] = report['saturdays_worked'].fillna(0)
         if 'name' in report.columns:
             report.drop('name', axis=1, inplace=True)
-        report['saturdays_absent'] = expected_saturdays - report['saturdays_worked']
-        report['weekdays_absent'] = report['days worked'] - report['saturdays_worked'] * 0.5
-        report.drop(['saturdays_worked', 'saturdays_absent', 'weekdays_absent'], axis=1, inplace=True)
+        report.drop(['saturdays_worked'], axis=1, inplace=True)
         
         report['avg_lunch_raw'] = report.apply(
             lambda x: x['daily_lunch_minutes'] / x['has_lunch_break'] if x['has_lunch_break'] > 0 else (x['daily_lunch_minutes'] if x['daily_lunch_minutes'] > 0 else 0), axis=1
         )
         report['AVG LUNCH TIME'] = report['avg_lunch_raw'].apply(minutes_to_hhmm)
         
-        # Apply 1h deduction for each no-lunch penalty
-        report['lunch_penalty_hours'] = report['lunch_penalty_hours'].fillna(0)
-        
-        # Calculate balance with lunch penalty deducted
-        report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED'] - report['lunch_penalty_hours']
-        report['TOTAL HOURS NEEDED'] = report['TOTAL HOURS NEEDED'].apply(decimal_hours_to_hhmm)
-        report['TOTAL HOURS WORKED'] = report['TOTAL HOURS WORKED'].apply(decimal_hours_to_hhmm)
+        # Balance uses TOTAL HOURS WORKED (from Tps Eff, already accurate)
+        report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED']
+        report['TOTAL HOURS NEEDED']      = report['TOTAL HOURS NEEDED'].apply(decimal_hours_to_hhmm)
+        report['TOTAL HOURS WORKED']      = report['TOTAL HOURS WORKED'].apply(decimal_hours_to_hhmm)
         report['Balance of hours worked'] = report['balance_raw'].apply(decimal_hours_to_hhmm)
         
-        # Format starting day
         report['STARTING DAY'] = report['starting_day'].apply(lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '')
         
         final_cols = [
-            'Employee name', 
+            'Employee name',
             'STARTING DAY',
-            'real working hours', 
-            'hours worked',
-            'ABSENCE', 
-            'HALF DAYS', 
-            'UNDER 9H', 
-            'NO LUNCH', 
+            'real working days',
+            'days worked',
+            'ABSENCE',
+            'HALF DAYS',
+            'UNDER 9H',
+            'NO LUNCH',
             'AVG LUNCH TIME',
-            'ENTRY > 10H', 
-            'ENTRY > 8H', 
-            'TOTAL HOURS NEEDED', 
-            'TOTAL HOURS WORKED', 
+            'ENTRY > 10H',
+            'ENTRY > 8H',
+            'TOTAL HOURS NEEDED',
+            'TOTAL HOURS WORKED',
             'Balance of hours worked'
         ]
         return report[final_cols].sort_values('ABSENCE', ascending=False)
@@ -715,7 +685,7 @@ def process_production_monthly_analysis(input_dir, output_dir):
     # --- EXPORT ---
     try:
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-            workbook = writer.book
+            workbook  = writer.book
             worksheet = workbook.add_worksheet('Monthly Production Summary')
             
             header_title = workbook.add_format({
@@ -739,29 +709,26 @@ def process_production_monthly_analysis(input_dir, output_dir):
                 'fg_color': '#ED7D31', 'font_color': 'white', 'border': 1
             })
             body_format = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
-            text_format = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter'})
+            text_format = workbook.add_format({'border': 1, 'align': 'left',   'valign': 'vcenter'})
             absence_red_format = workbook.add_format({
                 'border': 1, 'align': 'center', 'valign': 'vcenter', 
                 'bg_color': '#FFC7CE', 'font_color': '#9C0006'
             })
             
+            num_cols    = 14
             current_row = 0
-            num_cols = 14
             
-            # Write main title
             worksheet.merge_range(0, 0, 0, num_cols - 1, header_text, header_title)
             current_row = 2
             
-            # Write table
             if production_report is not None and not production_report.empty:
                 table_start = min_date.strftime('%d/%m/%Y') if min_date else ''
-                table_end = max_date.strftime('%d/%m/%Y') if max_date else ''
+                table_end   = max_date.strftime('%d/%m/%Y') if max_date else ''
                 table_title = f"JOURS PRODUCTION (9h/jour, 5h Samedi) - Du {table_start} au {table_end}"
                 
                 worksheet.merge_range(current_row, 0, current_row, num_cols - 1, table_title, section_header)
                 current_row += 1
                 
-                # Column headers
                 for col_num, value in enumerate(production_report.columns.values):
                     if "ABSENCE" in str(value):
                         worksheet.write(current_row, col_num, value, header_red)
@@ -771,13 +738,12 @@ def process_production_monthly_analysis(input_dir, output_dir):
                         worksheet.write(current_row, col_num, value, header_format)
                 current_row += 1
                 
-                # Data rows
                 for row_idx, row_data in production_report.iterrows():
                     for col_num, col_name in enumerate(production_report.columns):
                         value = row_data[col_name]
                         if pd.isna(value): 
                             value = ""
-                        if col_name in ['real working hours', 'hours worked', 'ABSENCE', 'HALF DAYS', 'UNDER 9H', 'NO LUNCH', 'ENTRY > 10H', 'ENTRY > 8H']:
+                        if col_name in ['real working days', 'days worked', 'ABSENCE', 'HALF DAYS', 'UNDER 9H', 'NO LUNCH', 'ENTRY > 10H', 'ENTRY > 8H']:
                             if value == 0: 
                                 value = 0
                         elif col_name in ['AVG LUNCH TIME', 'Balance of hours worked', 'TOTAL HOURS WORKED']:
@@ -793,18 +759,15 @@ def process_production_monthly_analysis(input_dir, output_dir):
                             worksheet.write(current_row, col_num, value, cell_fmt)
                     current_row += 1
             
-            # Set column widths
             for i in range(num_cols):
                 if i == 0:
                     worksheet.set_column(i, i, 20)
-                elif i == 1:  # STARTING DAY
+                elif i == 1:
                     worksheet.set_column(i, i, 12)
-                elif i in [2, 3, 4, 5, 6, 7, 8, 9, 10]:
+                elif i in range(2, 11):
                     worksheet.set_column(i, i, 10)
-                elif i in [11, 12, 13]:
-                    worksheet.set_column(i, i, 14)
                 else:
-                    worksheet.set_column(i, i, 12)
+                    worksheet.set_column(i, i, 14)
 
         print(f"\nSUCCESS! Monthly Production report generated: {output_path}")
         return output_path

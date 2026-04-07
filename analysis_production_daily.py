@@ -37,9 +37,7 @@ def clean_name_string(name):
     if not name:
         return ""
     name = str(name)
-    # Only remove problematic whitespace characters but preserve original format
     name = name.replace('\xa0', ' ').replace('\t', ' ').replace('\n', ' ')
-    # Don't uppercase, don't normalize multiple spaces - keep original name
     return name.strip()
 
 def parse_scan_times(scan_str):
@@ -53,6 +51,27 @@ def parse_scan_times(scan_str):
     for i, time_val in enumerate(times):
         scans[f'scan_{i+1}'] = time_val  
     return scans, count, times
+
+def parse_tps_eff(tps_eff_val):
+    """
+    Parses the 'Tps Eff' column (col 4) from the pointage file.
+    Returns hours as float, or None if unparseable/zero.
+    Production workers' Tps Eff reflects the actual system-calculated hours.
+    """
+    if tps_eff_val is None:
+        return None
+    s = str(tps_eff_val).strip()
+    m = re.match(r'^(\d+):(\d{2})$', s)
+    if m:
+        val = int(m.group(1)) + int(m.group(2)) / 60.0
+        return val if val > 0 else None
+    try:
+        f = float(s)
+        if 0.0 < f < 5.0:
+            return round(f * 24, 4)
+    except ValueError:
+        pass
+    return None
 
 def get_sheet_rows(file_path):
     """Générateur qui produit des lignes de fichiers .xlsx ou .xls."""
@@ -94,7 +113,6 @@ def process_employee_buffer(employee_data):
         return []
 
     records = employee_data['records']
-    name = employee_data.get('name', 'Unknown')
     
     weekday_recs = []
     for r in records:
@@ -162,7 +180,7 @@ def extract_date_from_string(date_str):
     return None
 
 def extract_daily_data(file_path):
-    """Extrait les données, met en mémoire tampon par employé pour vérifier le statut TAP via la colonne HJ."""
+    """Extrait les données Production par employé via la colonne HJ."""
     all_records = []
     current_employee = {'service': '', 'name': '', 'matricule': '', 'records': []}
     source_file_name = os.path.basename(file_path)
@@ -202,9 +220,16 @@ def extract_daily_data(file_path):
                 
                 hj_val = row[1].value if len(row) > 1 else ''
                 raw_scan_val = row[2].value if len(row) > 2 else ''
-                
+                # FIX: Read Tps Eff (col4) for accurate hours
+                tps_eff_val = row[4].value if len(row) > 4 else None
+
                 row_text = (val_0 + " " + str(raw_scan_val)).upper()
-                if "CONGE-" in row_text:
+
+                # FIX: Skip all non-worked day types including ABSENCE AUTORISÉE
+                if ("CONGE" in row_text or
+                    "ABSENCE AUTORIS" in row_text or
+                    "ABSENCE NON JUSTIFI" in row_text or
+                    "JOUR FERIE" in row_text):
                     continue
 
                 if 'Date' not in val_0 and 'Heures' not in val_0:
@@ -222,6 +247,25 @@ def extract_daily_data(file_path):
                         except:
                             full_date = None
 
+                    # FIX: Use Tps Eff for hours; fallback to raw scan calculation
+                    tps_eff_hours = parse_tps_eff(tps_eff_val)
+                    if tps_eff_hours is not None:
+                        hours_worked = round(tps_eff_hours, 2)
+                    else:
+                        total_sec = 0
+                        for i in range(0, len(times_list) - 1, 2):
+                            try:
+                                t_in  = datetime.strptime(times_list[i], '%H:%M')
+                                t_out = datetime.strptime(times_list[i+1], '%H:%M')
+                                if t_out < t_in: t_out += timedelta(days=1)
+                                total_sec += (t_out - t_in).total_seconds()
+                            except:
+                                continue
+                        hours_worked = round(total_sec / 3600, 2)
+
+                    is_sat = val_0.lower().startswith('sa')
+                    target_hours = SATURDAY_HOURS if is_sat else WEEKDAY_HOURS
+
                     record = {
                         'source_file': source_file_name,
                         'name': current_employee.get('name', ''),
@@ -232,6 +276,8 @@ def extract_daily_data(file_path):
                         'hj_code': str(hj_val).strip(),
                         'scan_count': calculated_count,
                         'raw_pointages': str(raw_scan_val) if raw_scan_val else '',
+                        'hours_worked': hours_worked,
+                        'target_hours': target_hours,
                         'month_num': month_num,
                         'year_num': year_num
                     }
@@ -242,6 +288,8 @@ def extract_daily_data(file_path):
 
     except Exception as e:
         print(f"Erreur lors de l'ouverture du fichier {os.path.basename(file_path)} : {e}")
+        import traceback
+        print(traceback.format_exc())
         return []
     
     return all_records
@@ -250,44 +298,33 @@ def analyze_row(row):
     """Calcule les indicateurs pour retard, pas de déjeuner, heures et demi-journée pour TAP."""
     scans = re.findall(r'\d{1,2}:\d{2}', str(row.get('raw_pointages', '')))
     
-    late_800 = False
+    late_800  = False
     late_1000 = False
-    no_lunch = False
+    no_lunch  = False
     is_half_day = False
-    hours_worked = 0.0
+    hours_worked = row.get('hours_worked', 0.0)
     is_absent = False
 
     if not scans:
         is_absent = True
         return late_800, late_1000, no_lunch, hours_worked, is_half_day, is_absent
     
-    total_seconds = 0
-    for i in range(0, len(scans) - 1, 2):
-        t_in = datetime.strptime(scans[i], '%H:%M')
-        t_out = datetime.strptime(scans[i+1], '%H:%M')
-        if t_out < t_in: t_out += timedelta(days=1)
-        total_seconds += (t_out - t_in).total_seconds()
-        
-    hours_worked = round(total_seconds / 3600, 2)
-    
     first_scan_dt = datetime.strptime(scans[0], '%H:%M')
     
-    limit_800 = first_scan_dt.replace(hour=8, minute=0, second=0)
+    limit_800  = first_scan_dt.replace(hour=8,  minute=0, second=0)
     limit_1000 = first_scan_dt.replace(hour=10, minute=0, second=0)
     limit_1300 = first_scan_dt.replace(hour=13, minute=0, second=0)
 
     if first_scan_dt > limit_1000:
         late_1000 = True
-        late_800 = False
+        late_800  = False
     elif first_scan_dt > limit_800:
         late_1000 = False
-        late_800 = True
+        late_800  = True
 
     day_str = str(row.get('day_str', '')).lower()
     is_saturday = day_str.startswith('sa')
-    is_friday_flag = is_friday(row.get('full_date'))
 
-    # TAP: Check lunch break (4 scans needed)
     if is_saturday:
         no_lunch = False
     else:
@@ -295,13 +332,13 @@ def analyze_row(row):
 
     if not is_saturday and len(scans) >= 2 and hours_worked > 0:
         t_first = datetime.strptime(scans[0], '%H:%M')
-        t_last = datetime.strptime(scans[-1], '%H:%M')
+        t_last  = datetime.strptime(scans[-1], '%H:%M')
         
         if t_last < t_first: 
             t_last += timedelta(days=1)
             
         cond_afternoon = (t_first >= limit_1300)
-        cond_morning = (t_last <= limit_1300) and (hours_worked < 8.0)
+        cond_morning   = (t_last <= limit_1300) and (hours_worked < 8.0)
         
         if cond_afternoon or cond_morning:
             is_half_day = True
@@ -312,18 +349,18 @@ def create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, f
     """Crée un DataFrame à 3 colonnes : [Nom, Compte, %]"""
     subset = daily_df[daily_df[flag_column]].copy()
     result = subset[['name']].reset_index(drop=True)
-    
+
     if flag_column == 'is_under_hours' and daily_df['day_str'].iloc[0].startswith('Sa'):
         stats_to_use = monthly_stats_saturday
     else:
         stats_to_use = monthly_stats
-    
+
     result['Count'] = result['name'].map(stats_to_use[flag_column]).fillna(0).astype(int)
-    
-    total_days = result['name'].map(stats_to_use['total_attendance']).fillna(1) 
-    
+
+    total_days = result['name'].map(stats_to_use['total_attendance']).fillna(1)
+
     result['%'] = (result['Count'] / total_days)
-    
+
     result.columns = [output_header, 'Count', '%']
     return result
 
@@ -367,7 +404,7 @@ def process_production_daily_analysis(input_dir, output_dir):
     # --- DÉTECTION CHRONOLOGIQUE ---
     if 'day_numeric' in df.columns and not df.empty:
         month_num = df['month_num'].iloc[0] if 'month_num' in df.columns else '01'
-        year_num = df['year_num'].iloc[0] if 'year_num' in df.columns else '2026'
+        year_num  = df['year_num'].iloc[0]  if 'year_num'  in df.columns else '2026'
         
         unique_days_in_order = []
         seen = set()
@@ -377,7 +414,7 @@ def process_production_daily_analysis(input_dir, output_dir):
                 seen.add(d)
 
         real_start_day = unique_days_in_order[0]
-        real_end_day = unique_days_in_order[-1]
+        real_end_day   = unique_days_in_order[-1]
         
         has_transition = False
         pivot_index = -1
@@ -393,7 +430,7 @@ def process_production_daily_analysis(input_dir, output_dir):
         target_report_day = real_end_day
         
         last_day_records = df[df['day_numeric'] == target_report_day]
-        total_last_day = len(last_day_records)
+        total_last_day   = len(last_day_records)
         incomplete_count = len(last_day_records[last_day_records['scan_count'] <= 1])
         
         if total_last_day > 0 and (incomplete_count / total_last_day) > 0.5:
@@ -415,25 +452,23 @@ def process_production_daily_analysis(input_dir, output_dir):
         
     else:
         print("DEBUG: No day_numeric column found in data")
-        print(f"DEBUG: Available columns: {df.columns.tolist()}")
         return None
 
     print("\nCalcul des métriques Production...")
     results = df.apply(analyze_row, axis=1)
     
-    df['is_late_800'] = [x[0] for x in results]
+    df['is_late_800']  = [x[0] for x in results]
     df['is_late_1000'] = [x[1] for x in results]
-    df['no_lunch'] = [x[2] for x in results]
+    df['no_lunch']     = [x[2] for x in results]
     df['hours_worked'] = [x[3] for x in results]
-    df['is_half_day'] = [x[4] for x in results] 
-    df['is_absent'] = [x[5] for x in results] 
+    df['is_half_day']  = [x[4] for x in results] 
+    df['is_absent']    = [x[5] for x in results] 
     
     if 'day_str' in df.columns:
         mask_saturday = df['day_str'].astype(str).str.startswith('Sa')
         df.loc[mask_saturday, 'no_lunch'] = False
 
-    # TAP: 9h target for weekdays, 5h for Saturdays
-    df['target_hours'] = df.apply(lambda x: 5.0 if str(x['day_str']).startswith('Sa') else 9.0, axis=1)
+    # FIX: Use per-row target_hours stored during extraction
     df['is_under_hours'] = (df['scan_count'] > 0) & (df['hours_worked'] < df['target_hours'])
 
     cols_to_sum = ['is_late_800', 'is_late_1000', 'no_lunch', 'is_half_day', 'is_absent']
@@ -441,27 +476,23 @@ def process_production_daily_analysis(input_dir, output_dir):
     valid_days_df = df[df['hours_worked'] > 0]
     
     saturday_records = valid_days_df[valid_days_df['day_str'].str.startswith('Sa')]
-    weekday_records = valid_days_df[~valid_days_df['day_str'].str.startswith('Sa')]
+    weekday_records  = valid_days_df[~valid_days_df['day_str'].str.startswith('Sa')]
     
     monthly_stats_weekday = weekday_records.groupby('name')[cols_to_sum].sum()
     monthly_stats_weekday['total_attendance'] = weekday_records.groupby('name').size()
-    monthly_stats_weekday['is_under_hours'] = weekday_records.groupby('name')['is_under_hours'].sum()
+    monthly_stats_weekday['is_under_hours']   = weekday_records.groupby('name')['is_under_hours'].sum()
     
     monthly_stats_saturday = saturday_records.groupby('name')[cols_to_sum].sum()
     monthly_stats_saturday['total_attendance'] = saturday_records.groupby('name').size()
-    monthly_stats_saturday['is_under_hours'] = saturday_records.groupby('name')['is_under_hours'].sum()
+    monthly_stats_saturday['is_under_hours']   = saturday_records.groupby('name')['is_under_hours'].sum()
     
     monthly_stats = monthly_stats_weekday.combine_first(monthly_stats_saturday)
     
-    # --- GET TARGET DAY FOR DAILY ANALYSIS ---
-    # Get actual available days from the (possibly filtered) df
+    # Use last available day in the filtered df
     available_days = df['day_numeric'].unique()
-    print(f"DEBUG: Available days after filtering: {available_days}")
     if len(available_days) == 0:
-        print("DEBUG: No days available after filtering")
         return None
     
-    # Use the last available day in the filtered df
     target_report_day = max(available_days)
     
     if 'day_numeric' in df.columns:
@@ -470,11 +501,9 @@ def process_production_daily_analysis(input_dir, output_dir):
         daily_df = pd.DataFrame()
 
     if daily_df.empty:
-        print(f"DEBUG: daily_df empty for target day {target_report_day}")
-        print(f"DEBUG: df has {len(df)} records, day_numeric values: {df['day_numeric'].unique()}")
         return None
 
-    sample_day_str = daily_df.iloc[0]['day_str'] if not daily_df.empty else ""
+    sample_day_str   = daily_df.iloc[0]['day_str'] if not daily_df.empty else ""
     is_target_saturday = str(sample_day_str).startswith('Sa')
 
     if is_target_saturday:
@@ -482,11 +511,11 @@ def process_production_daily_analysis(input_dir, output_dir):
     else:
         under_header = "Moins de 9h"
     
-    df_under = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_under_hours', under_header)
-    df_late_10 = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_late_1000', "Entrée > 10:00")
-    df_late_8 = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_late_800', "Entrée > 08:00")
-    df_half_day = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_half_day', "Demi-Journée")
-    df_absent = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_absent', "Absence")
+    df_under    = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_under_hours', under_header)
+    df_late_10  = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_late_1000', "Entrée > 10:00")
+    df_late_8   = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_late_800',  "Entrée > 08:00")
+    df_half_day = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_half_day',  "Demi-Journée")
+    df_absent   = create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, 'is_absent',    "Absence")
 
     if is_target_saturday:
         main_list = pd.concat([df_under, df_late_10, df_late_8, df_absent], axis=1)
@@ -495,16 +524,8 @@ def process_production_daily_analysis(input_dir, output_dir):
         main_list = pd.concat([df_under, df_half_day, df_no_lunch, df_late_10, df_late_8, df_absent], axis=1)
 
     if not df.empty and 'day_numeric' in df.columns:
-        if has_transition:
-            first_month_days = unique_days_in_order[:pivot_index + 1]
-            second_month_days = unique_days_in_order[pivot_index + 1:]
-            total_days = len(first_month_days) + len(second_month_days)
-        else:
-            total_days = len(unique_days_in_order)
-        
         dynamic_filename = f"POINTAGE PRODUCTION ANALYSE DU {real_start_day:02d}-{month_num}-{year_num} A {real_end_day:02d}-{month_num}-{year_num}.xlsx"
         output_path = os.path.join(output_dir, dynamic_filename)
-        
         header_text = f"Analyse Quotidienne Production - Période : {real_start_day} au {real_end_day} {month_name} {year_num}"
     else:
         header_text = "Analyse Quotidienne Production - Période non spécifiée"
@@ -514,7 +535,7 @@ def process_production_daily_analysis(input_dir, output_dir):
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
             main_list.to_excel(writer, sheet_name='Analyse Production Quotidienne', index=False, header=False, startrow=2)
             
-            workbook = writer.book
+            workbook  = writer.book
             worksheet = writer.sheets['Analyse Production Quotidienne']
             
             header_title = workbook.add_format({
@@ -540,25 +561,25 @@ def process_production_daily_analysis(input_dir, output_dir):
                 'fg_color': '#C00000', 'font_color': 'white', 'border': 1
             })
             
-            body_left = workbook.add_format({'border': 1, 'align': 'left'})
+            body_left   = workbook.add_format({'border': 1, 'align': 'left'})
             body_center = workbook.add_format({'border': 1, 'align': 'center'})
-            body_pct = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0%'})
+            body_pct    = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0%'})
 
             max_rows = len(main_list)
-            columns = main_list.columns.tolist()
+            columns  = main_list.columns.tolist()
 
             for i, col_name in enumerate(columns):
                 col_name_str = str(col_name)
                 
-                col_format = body_left
+                col_format   = body_left
                 header_style = header_blue
 
                 if "Count" in col_name_str:
                     header_style = header_orange
-                    col_format = body_center
+                    col_format   = body_center
                 elif "%" in col_name_str:
                     header_style = header_orange
-                    col_format = body_pct
+                    col_format   = body_pct
                 elif "Demi-Journée" in col_name_str:
                     header_style = header_orange
                 elif "Absence" in col_name_str:

@@ -9,6 +9,13 @@ import xlrd
 # Suppress warnings from openpyxl if it reads misnamed files
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
+# Employee service database
+import sys as _sys
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+if _base_dir not in _sys.path:
+    _sys.path.insert(0, _base_dir)
+import employees_db
+
 # --- CONFIGURATION ---
 import os
 FOLDER_PATH = os.path.join(os.path.dirname(__file__), "Data")
@@ -49,8 +56,31 @@ def parse_scan_times(scan_str):
     times = re.findall(r'\d{1,2}:\d{2}', scan_str)
     return times, len(times)
 
+def parse_tps_eff(tps_eff_val):
+    """
+    Parses the 'Tps Eff' (effective time) column from the pointage file.
+    This is the system-calculated worked hours, already accounting for
+    automatic lunch deductions where applicable.
+    Returns hours as a float, or None if unparseable.
+    """
+    if tps_eff_val is None:
+        return None
+    s = str(tps_eff_val).strip()
+    # Handle HH:MM string format
+    m = re.match(r'^(\d+):(\d{2})$', s)
+    if m:
+        return int(m.group(1)) + int(m.group(2)) / 60.0
+    # Handle numeric (Excel may store time as fraction of day)
+    try:
+        f = float(s)
+        if 0.0 < f < 5.0:   # plausible day fraction
+            return round(f * 24, 4)
+    except ValueError:
+        pass
+    return None
+
 def calculate_hours_from_scans(times):
-    """Calculates total worked hours from a list of 'HH:MM' strings."""
+    """Calculates total worked hours from a list of 'HH:MM' strings (fallback)."""
     if not times:
         return 0.0
     
@@ -226,6 +256,10 @@ def extract_data(file_path):
             elif any(val_0.startswith(day) for day in DAYS_FRENCH) and any(char.isdigit() for char in val_0):
                 hj_val = row[1].value if len(row) > 1 else ''
                 raw_scan_val = row[2].value if len(row) > 2 else ''
+                # col3 = Tps Dû (target hours), col4 = Tps Eff (actual effective hours)
+                tps_du_val  = row[3].value if len(row) > 3 else None
+                tps_eff_val = row[4].value if len(row) > 4 else None
+
                 row_text_upper = (str(val_0) + " " + str(raw_scan_val)).upper()
                 date_obj = extract_date_from_string(val_0)
                 
@@ -248,12 +282,27 @@ def extract_data(file_path):
                     is_holiday = 1
                     if is_sunday: is_holiday = 0 
                 elif "CONGE" in row_text_upper:
+                    # Treat as leave regardless of whether there are also scan times
+                    is_leave = 1
+                elif "ABSENCE AUTORIS" in row_text_upper:
+                    # FIX: 'ABSENCE AUTORISÉE' is an authorized (justified) absence
+                    # treated the same as CONGE (leave)
                     is_leave = 1
                 elif "ABSENCE NON JUSTIFIÉE-" in row_text_upper:
                     is_unjustified_absence = 1 
                 else:
                     times_list, scan_count = parse_scan_times(raw_scan_val)
-                    hours_worked = calculate_hours_from_scans(times_list)
+
+                    # --- HOURS WORKED: prefer Tps Eff (system-calculated, accurate) ---
+                    # The pointage system automatically deducts 1h lunch for certain
+                    # contract types (e.g. HJ 140) when only 2 scans are recorded.
+                    # Using Tps Eff ensures we reflect the same value as the source system.
+                    tps_eff_hours = parse_tps_eff(tps_eff_val) if tps_eff_val is not None else None
+                    if tps_eff_hours is not None and tps_eff_hours > 0:
+                        hours_worked = round(tps_eff_hours, 2)
+                    elif times_list:
+                        # Fallback: calculate from scan pairs if Tps Eff is unavailable
+                        hours_worked = calculate_hours_from_scans(times_list)
                     
                     if len(times_list) >= 4 and not is_saturday:
                         daily_lunch_minutes = calculate_lunch_minutes(times_list)
@@ -261,12 +310,21 @@ def extract_data(file_path):
                     
                     if hours_worked > 0:
                         is_day_worked = 1
-                        if is_saturday:
-                            daily_target_for_worked_day = 4.0
-                        elif is_ramadan:
-                            daily_target_for_worked_day = 7.0
+
+                        # --- DAILY TARGET: prefer Tps Dû (contract target) ---
+                        # Tps Dû reflects the employee's contractual daily target
+                        # (e.g. 4h vs 5h on Saturdays, 7h during Ramadan, 8h normal)
+                        tps_du_hours = parse_tps_eff(tps_du_val) if tps_du_val is not None else None
+                        if tps_du_hours is not None and tps_du_hours > 0:
+                            daily_target_for_worked_day = round(tps_du_hours, 2)
                         else:
-                            daily_target_for_worked_day = 8.0
+                            # Fallback to hardcoded defaults
+                            if is_saturday:
+                                daily_target_for_worked_day = 4.0
+                            elif is_ramadan:
+                                daily_target_for_worked_day = 7.0
+                            else:
+                                daily_target_for_worked_day = 8.0
 
                 if date_obj:
                     day_numeric = date_obj.day
@@ -299,6 +357,8 @@ def extract_data(file_path):
     
     except Exception as e:
         print(f"Error opening {os.path.basename(file_path)}: {e}")
+        import traceback
+        print(traceback.format_exc())
         return []
     
     return all_records
@@ -356,18 +416,18 @@ def analyze_record(row):
     else:
         no_lunch = 1 if (len(times) < 4 and not is_saturday) else 0
 
-    # --- TARGET HOURS ---
-    # During Ramadan: 7h for weekdays, 4h for Saturdays
-    if is_saturday:
-        target = 4.0
-    else:
-        target = 7.0 if is_ramadan else 8.0
-    
+    # --- TARGET HOURS (use per-day target from Tps Dû when available) ---
+    target = row.get('daily_target_for_worked_day', 0)
+    if target <= 0:
+        # Fallback
+        if is_saturday:
+            target = 4.0
+        else:
+            target = 7.0 if is_ramadan else 8.0
+
     is_under = 1 if row['hours_worked'] > 0 and row['hours_worked'] < target else 0
 
-    # --- HALF DAY LOGIC (REVISED) ---
-    # During Ramadan: threshold is 6.5h (since target is 7h), otherwise 7h (since target is 8h)
-    
+    # --- HALF DAY LOGIC ---
     if row['is_day_worked'] and not is_saturday and len(times) >= 2:
         try:
             t_entry = datetime.strptime(times[0], '%H:%M')
@@ -377,7 +437,7 @@ def analyze_record(row):
             # --- Condition A: Afternoon Only (Entered after 13:00) ---
             cond_afternoon = (t_entry >= limit_1300)
             
-            # --- Condition B: Morning Only (Left before 14:00) ---
+            # --- Condition B: Morning Only (Left before 14:00, worked less than threshold) ---
             hours_threshold = 6.5 if is_ramadan else 7.0
             cond_morning = (t_exit <= limit_1400) and (row['hours_worked'] < hours_threshold)
             
@@ -633,7 +693,6 @@ def process_monthly_analysis(input_dir, output_dir):
         def calc_weighted_days_worked(group):
             weekdays = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
             saturdays = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_day_worked'] == 1)]
-            # Count unique days for each
             weekday_days = len(weekdays['day_numeric'].unique())
             saturday_days = len(saturdays['day_numeric'].unique())
             return weekday_days + (saturday_days * 0.5)
@@ -642,11 +701,22 @@ def process_monthly_analysis(input_dir, output_dir):
         def calc_weighted_absence(group):
             weekday_absences = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
             saturday_absences = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_unjustified_absence'] == 1)]
-            # Count unique days for each
             weekday_abs_count = len(weekday_absences['day_numeric'].unique())
             saturday_abs_count = len(saturday_absences['day_numeric'].unique())
             return weekday_abs_count + (saturday_abs_count * 0.5)
-        
+
+        # FIX: Weighted leave/holiday days (Saturday leave = 0.5, weekday leave = 1.0)
+        # This ensures 'real working days' is correctly reduced by fractional leave days
+        def calc_weighted_leave(group):
+            weekday_leave = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_leave'] == 1)]
+            saturday_leave = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_leave'] == 1)]
+            return len(weekday_leave) * 1.0 + len(saturday_leave) * 0.5
+
+        def calc_weighted_holiday(group):
+            weekday_hol = group[(~group['day_str'].str.startswith('Sa', na=False)) & (group['is_holiday'] == 1)]
+            saturday_hol = group[(group['day_str'].str.startswith('Sa', na=False)) & (group['is_holiday'] == 1)]
+            return len(weekday_hol) * 1.0 + len(saturday_hol) * 0.5
+
         # Calculate weighted days worked per employee
         weighted_days = subset_df.groupby('name').apply(calc_weighted_days_worked).reset_index()
         weighted_days.columns = ['name', 'weighted_days_worked']
@@ -654,6 +724,13 @@ def process_monthly_analysis(input_dir, output_dir):
         # Calculate weighted absence per employee
         weighted_absence = subset_df.groupby('name').apply(calc_weighted_absence).reset_index()
         weighted_absence.columns = ['name', 'weighted_absence']
+
+        # FIX: Weighted leave/holiday per employee
+        weighted_leave = subset_df.groupby('name').apply(calc_weighted_leave).reset_index()
+        weighted_leave.columns = ['name', 'weighted_leave']
+
+        weighted_holiday = subset_df.groupby('name').apply(calc_weighted_holiday).reset_index()
+        weighted_holiday.columns = ['name', 'weighted_holiday']
         
         report = subset_df.groupby('name').agg({
             'is_day_worked': 'sum',
@@ -672,27 +749,39 @@ def process_monthly_analysis(input_dir, output_dir):
             'has_lunch_break': 'sum'
         }).reset_index()
         
-        # Merge weighted days worked
+        # Merge weighted values
         report = report.merge(weighted_days, on='name', how='left')
-        
-        # Merge weighted absence (overrides the simple sum)
         report = report.merge(weighted_absence, on='name', how='left')
-        
+        report = report.merge(weighted_leave, on='name', how='left')
+        report = report.merge(weighted_holiday, on='name', how='left')
+
         report.rename(columns={
             'name': 'Employee name',
             'weighted_days_worked': 'days worked',
             'weighted_absence': 'ABSENCE',
-            'daily_target_for_worked_day': 'TOTAL HOURS NEEDED', 
+            'daily_target_for_worked_day': 'TOTAL HOURS NEEDED',
             'hours_worked': 'TOTAL HOURS WORKED',
             'IS HALF DAY': 'HALF DAYS'
         }, inplace=True)
+
+        # Add service column from employee database
+        report['Service'] = report['Employee name'].apply(employees_db.lookup_service)
+
         # Rename UNDER 8H based on table type
         if is_ramadan_table:
             report.rename(columns={'UNDER 8H': 'UNDER 7H'}, inplace=True)
+
         saturday_records = subset_df[subset_df['day_str'].str.startswith('Sa', na=False)]
         expected_saturdays = len(saturday_records['day_numeric'].unique())
-        # Use table-specific working days, not global
-        report['real working days'] = table_expected_days - report['is_leave'] - report['is_holiday']
+
+        # FIX: Use weighted leave/holiday to correctly compute real working days
+        report['real working days'] = (
+            table_expected_days
+            - report['weighted_leave']
+            - report['weighted_holiday']
+        )
+        report.drop(['weighted_leave', 'weighted_holiday', 'is_leave', 'is_holiday'], axis=1, inplace=True)
+
         saturday_work_by_employee = saturday_records[saturday_records['is_day_worked'] == 1].groupby('name').size().reset_index(name='saturdays_worked')
         saturday_work_by_employee['saturdays_worked'] = saturday_work_by_employee['saturdays_worked'].apply(lambda x: 1 if x > 0 else 0)
         report = report.merge(saturday_work_by_employee, left_on='Employee name', right_on='name', how='left')
@@ -701,33 +790,37 @@ def process_monthly_analysis(input_dir, output_dir):
             report.drop('name', axis=1, inplace=True)
         report['saturdays_absent'] = expected_saturdays - report['saturdays_worked']
         report['weekdays_absent'] = report['real working days'] - report['saturdays_absent'] - report['days worked']
-        # Only count unjustified absences, not calculated absences
         report.drop(['saturdays_worked', 'saturdays_absent', 'weekdays_absent'], axis=1, inplace=True)
+
         report['avg_lunch_raw'] = report.apply(
             lambda x: x['daily_lunch_minutes'] / x['has_lunch_break'] if x['has_lunch_break'] > 0 else (x['daily_lunch_minutes'] if x['daily_lunch_minutes'] > 0 else 0), axis=1
         )
         report['AVG LUNCH TIME'] = report['avg_lunch_raw'].apply(minutes_to_hhmm)
+
         # Calculate balance BEFORE converting to HH:MM format
         report['balance_raw'] = report['TOTAL HOURS WORKED'] - report['TOTAL HOURS NEEDED']
+
         # Convert hours columns to HH:MM format
         report['TOTAL HOURS NEEDED'] = report['TOTAL HOURS NEEDED'].apply(decimal_hours_to_hhmm)
         report['TOTAL HOURS WORKED'] = report['TOTAL HOURS WORKED'].apply(decimal_hours_to_hhmm)
         report['Balance of hours worked'] = report['balance_raw'].apply(decimal_hours_to_hhmm)
+
         # Get column list and mark which ones should show '-' for Ramadan
         final_cols = [
-            'Employee name', 
-            'real working days', 
+            'Employee name',
+            'Service',
+            'real working days',
             'days worked',
-            'ABSENCE', 
-            'HALF DAYS', 
-            'UNDER 8H' if not is_ramadan_table else 'UNDER 7H', 
-            'NO LUNCH', 
+            'ABSENCE',
+            'HALF DAYS',
+            'UNDER 8H' if not is_ramadan_table else 'UNDER 7H',
+            'NO LUNCH',
             'AVG LUNCH TIME',
-            'ENTRY > 14H', 
-            'ENTRY > 10H', 
-            'ENTRY > 9H30', 
-            'TOTAL HOURS NEEDED', 
-            'TOTAL HOURS WORKED', 
+            'ENTRY > 14H',
+            'ENTRY > 10H',
+            'ENTRY > 9H30',
+            'TOTAL HOURS NEEDED',
+            'TOTAL HOURS WORKED',
             'Balance of hours worked'
         ]
         # Columns to show '-' for Ramadan
@@ -773,7 +866,7 @@ def process_monthly_analysis(input_dir, output_dir):
             })
             
             current_row = 0
-            num_cols = 15
+            num_cols = 16  # 15 data columns (+ 1 for aesthetics in merge_range)
             
             # Write main title
             worksheet.merge_range(0, 0, 0, num_cols - 1, header_text, header_title)
@@ -814,7 +907,7 @@ def process_monthly_analysis(input_dir, output_dir):
                             if value == 0 or value == "00:00": 
                                 value = ""
                         # Determine cell format
-                        if col_name == 'Employee name':
+                        if col_name in ('Employee name', 'Service'):
                             cell_fmt = text_format
                         else:
                             cell_fmt = body_format
@@ -842,16 +935,32 @@ def process_monthly_analysis(input_dir, output_dir):
             
             # Set column widths
             for i in range(num_cols):
-                if i == 0:  # Employee name
-                    worksheet.set_column(i, i, 20)
-                elif i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:  # Count columns
+                if i == 0:                      # Employee name
+                    worksheet.set_column(i, i, 22)
+                elif i == 1:                    # Service (new)
+                    worksheet.set_column(i, i, 15)
+                elif i in range(2, 12):         # Count/numeric columns (shifted by 1)
                     worksheet.set_column(i, i, 10)
-                elif i in [11, 12, 13]:  # Time/Hour columns
+                elif i in [12, 13, 14]:         # Time/Hour columns (shifted by 1)
                     worksheet.set_column(i, i, 14)
                 else:
                     worksheet.set_column(i, i, 12)
 
         print(f"\nSUCCESS! Monthly report generated: {output_path}")
+
+        # --- UPDATE last_seen PER EMPLOYEE ---
+        try:
+            if 'full_date' in df.columns:
+                last_seen_map = (
+                    df[df['full_date'].notna()]
+                    .groupby('name')['full_date']
+                    .max()
+                    .to_dict()
+                )
+                employees_db.update_last_seen(last_seen_map)
+        except Exception:
+            pass
+
         return output_path
 
     except Exception as e:
