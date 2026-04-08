@@ -1,10 +1,11 @@
 """employees_db.py - Persistent employee service database.
 
-Stores the employee → service mapping as a JSON file (employees_db.json).
-Auto-initializes from 'liste personnels bureau.xlsx' on first run.
+Stores the employee → service mapping in Supabase.
+Auto-initializes from 'liste personnels bureau.xlsx' on first run if table is empty.
 
 Each employee record:
-  { matricule, nom, prenom, responsable, service, poste, last_seen }
+  { id, matricule, nom, prenom, responsable, service, poste, last_seen }
+  - id: Supabase-generated UUID
   - last_seen: ISO date string 'YYYY-MM-DD' of the most recent badge scan found in
     a bureau analysis run, or None if the employee was added manually and never seen.
 """
@@ -13,11 +14,51 @@ import os
 import re
 from datetime import date, datetime, timedelta
 
+# Supabase imports
+from supabase import create_client, Client
+
 _BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-DB_PATH    = os.path.join(_BASE_DIR, "employees_db.json")
 EXCEL_PATH = os.path.join(_BASE_DIR, "liste personnels bureau.xlsx")
 
 INACTIVE_DAYS = 30   # threshold for "stopped scanning" warning / auto-remove
+
+# Supabase configuration (from environment variables or will be set later)
+_supabase_url = os.environ.get("SUPABASE_URL", "")
+_supabase_key = os.environ.get("SUPABASE_KEY", "")
+_supabase_client: Client = None
+
+# Table name in Supabase
+TABLE_NAME = "employees"
+
+
+def _get_supabase_client() -> Client:
+    """Get or create Supabase client."""
+    global _supabase_client, _supabase_url, _supabase_key
+    
+    if _supabase_client is not None:
+        return _supabase_client
+    
+    # Try to get from environment or use defaults for local testing
+    url = _supabase_url or os.environ.get("SUPABASE_URL", "")
+    key = _supabase_key or os.environ.get("SUPABASE_KEY", "")
+    
+    # Also try to get from streamlit secrets if available (for app.py context)
+    if not url or not key:
+        try:
+            import streamlit as st
+            url = st.secrets.get("SUPABASE_URL", "")
+            key = st.secrets.get("SUPABASE_KEY", "")
+        except Exception:
+            pass
+    
+    if url and key:
+        try:
+            _supabase_client = create_client(url, key)
+            return _supabase_client
+        except Exception as e:
+            print(f"Warning: Could not connect to Supabase: {e}")
+    
+    return None
 
 
 def _clean(name: str) -> str:
@@ -32,23 +73,136 @@ def _clean(name: str) -> str:
 # ─── Persistence ─────────────────────────────────────────────────────────────
 
 def load_employees() -> list:
-    """Return the full employee list. Auto-initializes from Excel if JSON absent."""
-    if not os.path.exists(DB_PATH):
-        _init_from_excel()
-    if not os.path.exists(DB_PATH):
-        return []
-    with open(DB_PATH, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    """Return the full employee list from Supabase. Auto-initializes from Excel if table is empty."""
+    client = _get_supabase_client()
+    
+    if client is None:
+        # Fallback: try local JSON if Supabase is not available
+        return _load_from_local_fallback()
+    
+    try:
+        response = client.table(TABLE_NAME).select("*").execute()
+        employees = response.data if response.data else []
+        
+        # Auto-initialize from Excel if empty
+        if not employees and os.path.exists(EXCEL_PATH):
+            _init_from_excel_to_supabase()
+            response = client.table(TABLE_NAME).select("*").execute()
+            employees = response.data if response.data else []
+        
+        return employees
+    except Exception as e:
+        print(f"Warning: Could not load employees from Supabase: {e}")
+        return _load_from_local_fallback()
+
+
+def _load_from_local_fallback() -> list:
+    """Fallback to local JSON if Supabase is unavailable."""
+    db_path = os.path.join(_BASE_DIR, "employees_db.json")
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
 
 
 def save_employees(employees: list) -> None:
-    """Persist the employee list to JSON."""
-    with open(DB_PATH, 'w', encoding='utf-8') as f:
+    """Persist the employee list to Supabase."""
+    client = _get_supabase_client()
+    
+    if client is None:
+        # Fallback: save to local JSON
+        _save_to_local_fallback(employees)
+        return
+    
+    try:
+        # Get current employees to determine what to add/update/delete
+        current = load_employees()
+        current_ids = {e.get('id') for e in current if e.get('id')}
+        new_ids = {e.get('id') for e in employees if e.get('id')}
+        
+        # Delete removed employees
+        to_delete = current_ids - new_ids
+        for emp_id in to_delete:
+            client.table(TABLE_NAME).delete().eq('id', emp_id).execute()
+        
+        # Upsert (insert or update) employees
+        for emp in employees:
+            # Clean the employee data
+            record = {
+                'matricule': str(emp.get('matricule', '') or '').strip(),
+                'nom': str(emp.get('nom', '') or '').strip().upper(),
+                'prenom': str(emp.get('prenom', '') or '').strip().upper(),
+                'responsable': str(emp.get('responsable', '') or '').strip(),
+                'service': str(emp.get('service', '') or '').strip().lower(),
+                'poste': str(emp.get('poste', '') or '').strip(),
+                'last_seen': emp.get('last_seen'),
+            }
+            
+            emp_id = emp.get('id')
+            if emp_id:
+                # Update existing
+                client.table(TABLE_NAME).update(record).eq('id', emp_id).execute()
+            else:
+                # Insert new
+                client.table(TABLE_NAME).insert(record).execute()
+    except Exception as e:
+        print(f"Warning: Could not save employees to Supabase: {e}")
+        _save_to_local_fallback(employees)
+
+
+def _save_to_local_fallback(employees: list) -> None:
+    """Fallback to save to local JSON if Supabase is unavailable."""
+    db_path = os.path.join(_BASE_DIR, "employees_db.json")
+    with open(db_path, 'w', encoding='utf-8') as f:
         json.dump(employees, f, ensure_ascii=False, indent=2)
 
 
-def _init_from_excel() -> None:
+def _init_from_excel_to_supabase() -> None:
     """Bootstrap the DB from the Excel file (first row is a merged title – skip it)."""
+    if not os.path.exists(EXCEL_PATH):
+        return
+    
+    client = _get_supabase_client()
+    if client is None:
+        # Fallback: use local JSON initialization
+        _init_from_excel_to_local()
+        return
+    
+    try:
+        import pandas as pd
+        df = pd.read_excel(EXCEL_PATH, sheet_name='liste', skiprows=1)
+        df.columns = ['matricule', 'nom', 'prenom', 'responsable', 'service', 'poste']
+        employees = []
+        for _, row in df.iterrows():
+            nom = str(row.get('nom', '') or '').strip()
+            if not nom or nom.lower() == 'nan':
+                continue
+            employees.append({
+                'matricule':   str(row.get('matricule',   '') or '').strip(),
+                'nom':         nom.upper(),
+                'prenom':      str(row.get('prenom',      '') or '').strip().upper(),
+                'responsable': str(row.get('responsable', '') or '').strip(),
+                'service':     str(row.get('service',     '') or '').strip().lower(),
+                'poste':       str(row.get('poste',       '') or '').strip(),
+                'last_seen':   None,
+            })
+        
+        # Insert all employees to Supabase
+        if employees:
+            client.table(TABLE_NAME).insert(employees).execute()
+            print(f"Initialized employee DB with {len(employees)} employees from Excel in Supabase.")
+    except Exception as e:
+        print(f"Warning: Could not init employee DB from Excel to Supabase: {e}")
+
+
+def _init_from_excel_to_local() -> None:
+    """Bootstrap local JSON from Excel as fallback."""
+    db_path = os.path.join(_BASE_DIR, "employees_db.json")
+    if os.path.exists(db_path):
+        return
     if not os.path.exists(EXCEL_PATH):
         return
     try:
@@ -69,8 +223,8 @@ def _init_from_excel() -> None:
                 'poste':       str(row.get('poste',       '') or '').strip(),
                 'last_seen':   None,
             })
-        save_employees(employees)
-        print(f"Initialized employee DB with {len(employees)} employees from Excel.")
+        _save_to_local_fallback(employees)
+        print(f"Initialized employee DB with {len(employees)} employees from Excel (local fallback).")
     except Exception as e:
         print(f"Warning: Could not init employee DB from Excel: {e}")
 
@@ -187,33 +341,35 @@ def remove_inactive(reference_date=None, threshold_days: int = INACTIVE_DAYS) ->
 
 # ─── Service lookup ──────────────────────────────────────────────────────────
 
-def get_service_map() -> dict:
+def _build_field_map(field: str) -> dict:
     """
-    Build a lookup dict: cleaned name variant → capitalized service name.
+    Build a lookup dict: cleaned name variant → field value.
 
     Keys added per employee:
       - 'NOM PRENOM'  (full name)
       - 'PRENOM NOM'  (reversed, for flexible matching)
       - 'NOM'         (last-name-only fallback – added only if not already present)
     """
-    service_map: dict = {}
+    field_map: dict = {}
     for emp in load_employees():
-        nom     = _clean(emp.get('nom', ''))
-        prenom  = _clean(emp.get('prenom', ''))
-        service = emp.get('service', '').strip().capitalize()
+        nom    = _clean(emp.get('nom', ''))
+        prenom = _clean(emp.get('prenom', ''))
+        value  = emp.get(field, '').strip() if emp.get(field) else ''
+        if field == 'service':
+            value = value.capitalize()
         if not nom:
             continue
         if prenom:
-            service_map[f"{nom} {prenom}"] = service
-            service_map[f"{prenom} {nom}"] = service
-        if nom not in service_map:   # last-name fallback – don't override full-name entry
-            service_map[nom] = service
-    return service_map
+            field_map[f"{nom} {prenom}"] = value
+            field_map[f"{prenom} {nom}"] = value
+        if nom not in field_map:
+            field_map[nom] = value
+    return field_map
 
 
-def lookup_service(pointage_name: str) -> str:
+def _lookup_field(pointage_name: str, field: str) -> str:
     """
-    Find the service for a name as it appears in a pointage file.
+    Find the value of a given field for a name as it appears in a pointage file.
 
     Strategy:
       1. Exact match (full name or reversed variant).
@@ -224,13 +380,30 @@ def lookup_service(pointage_name: str) -> str:
     if not pointage_name:
         return ''
     cleaned = _clean(pointage_name)
-    smap = get_service_map()
+    fmap = _build_field_map(field)
 
-    if cleaned in smap:
-        return smap[cleaned]
+    if cleaned in fmap:
+        return fmap[cleaned]
 
-    for key, svc in smap.items():
+    for key, val in fmap.items():
         if cleaned.startswith(key) or key.startswith(cleaned):
-            return svc
+            return val
 
     return ''
+
+
+# Keep backward-compatible aliases
+def get_service_map() -> dict:
+    return _build_field_map('service')
+
+
+def lookup_service(pointage_name: str) -> str:
+    return _lookup_field(pointage_name, 'service')
+
+
+def lookup_responsable(pointage_name: str) -> str:
+    return _lookup_field(pointage_name, 'responsable')
+
+
+def lookup_poste(pointage_name: str) -> str:
+    return _lookup_field(pointage_name, 'poste')

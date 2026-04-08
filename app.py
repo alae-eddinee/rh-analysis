@@ -396,18 +396,14 @@ with tab_employees:
     st.header("👥 Gestion des Employés Bureau")
     st.markdown(
         "Gérez la liste des employés bureau et leurs services. "
-        "Ces informations enrichissent les rapports **Bureau** avec la colonne **Service**."
+        "Ces informations enrichissent les rapports **Bureau** avec les colonnes **Service**, **Responsable** et **Poste**."
     )
 
     employees = employees_db.load_employees()
 
-    # ── Section 1: current list (editable) ───────────────────────────────────
+    # ── Section 1: current list (editable + per-row delete) ──────────────────
     st.subheader("📋 Liste actuelle")
-    st.caption(
-        "Double-cliquez une cellule pour modifier. "
-        "Cochez la case à gauche d'une ligne puis appuyez sur **Suppr** pour la supprimer. "
-        "Utilisez le formulaire ci-dessous pour ajouter un nouvel employé."
-    )
+    st.info(f"**{len(employees)}** employé(s) dans la base de données.")
 
     if employees:
         df_emp = pd.DataFrame(employees)
@@ -420,9 +416,11 @@ with tab_employees:
             df_emp[col] = ''
     df_emp = df_emp[display_cols]
 
+    st.caption("Double-cliquez une cellule pour modifier, puis cliquez **Sauvegarder**. Utilisez le bouton 🗑️ pour supprimer un employé individuellement.")
+
     edited_df = st.data_editor(
         df_emp,
-        num_rows="fixed",      # no inline add – use the form below instead
+        num_rows="fixed",
         use_container_width=True,
         column_config={
             "matricule":   st.column_config.TextColumn("Matricule",      width="small"),
@@ -436,20 +434,37 @@ with tab_employees:
         key="employee_editor"
     )
 
-    col_save, col_info = st.columns([1, 3])
-    with col_save:
-        if st.button("💾 Sauvegarder les modifications", type="primary", key="save_employees"):
-            records = edited_df.fillna('').to_dict('records')
-            records = [r for r in records if str(r.get('nom', '')).strip()]
-            employees_db.save_employees(records)
-            st.success(f"✅ {len(records)} employés sauvegardés.")
-            st.rerun()
-    with col_info:
-        st.info(f"**{len(employees)}** employé(s) dans la base de données.")
+    if st.button("💾 Sauvegarder les modifications", type="primary", key="save_employees"):
+        records = edited_df.fillna('').to_dict('records')
+        records = [r for r in records if str(r.get('nom', '')).strip()]
+        employees_db.save_employees(records)
+        st.success(f"✅ {len(records)} employés sauvegardés.")
+        st.rerun()
 
     st.divider()
 
-    # ── Section 2: add a new employee ────────────────────────────────────────
+    # ── Section 2: individual remove ─────────────────────────────────────────
+    st.subheader("🗑️ Supprimer un employé")
+    if employees:
+        emp_options = {
+            f"{e.get('nom', '')} {e.get('prenom', '')} ({e.get('matricule', '') or 'sans mat.'})": i
+            for i, e in enumerate(employees)
+        }
+        selected_label = st.selectbox("Sélectionner l'employé à supprimer", list(emp_options.keys()), key="del_select")
+        if st.button("🗑️ Supprimer cet employé", type="secondary", key="del_single"):
+            idx = emp_options[selected_label]
+            removed_name = selected_label
+            current = employees_db.load_employees()
+            del current[idx]
+            employees_db.save_employees(current)
+            st.success(f"✅ **{removed_name}** supprimé.")
+            st.rerun()
+    else:
+        st.info("Aucun employé dans la base de données.")
+
+    st.divider()
+
+    # ── Section 3: add a new employee ────────────────────────────────────────
     st.subheader("➕ Ajouter un employé")
     with st.form("add_employee_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
@@ -484,7 +499,7 @@ with tab_employees:
 
     st.divider()
 
-    # ── Section 3: inactive employees (>30 days without scan) ────────────────
+    # ── Section 4: inactive employees (>30 days without scan) ────────────────
     st.subheader("⚠️ Employés inactifs (> 30 jours sans scan)")
     inactive = employees_db.get_inactive()
 
