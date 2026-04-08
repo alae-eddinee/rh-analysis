@@ -391,9 +391,9 @@ def analyze_row(row):
     return late_930, late_1000, late_1400, no_lunch, hours_worked, is_half_day, is_absent
 
 def create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, flag_column, output_header):
-    """Crée un DataFrame à 4 colonnes : [Nom, Service, Compte, %]"""
+    """Crée un DataFrame à 6 colonnes : [Nom, Service, Responsable, Poste, Compte, %]"""
     subset = daily_df[daily_df[flag_column]].copy()
-    result = subset[['name', 'service']].drop_duplicates(subset='name').reset_index(drop=True)
+    result = subset[['name', 'service', 'responsable', 'poste']].drop_duplicates(subset='name').reset_index(drop=True)
 
     if flag_column == 'is_under_hours' and daily_df['day_str'].iloc[0].startswith('Sa'):
         stats_to_use = monthly_stats_saturday
@@ -406,7 +406,7 @@ def create_category_dataframe(daily_df, monthly_stats, monthly_stats_saturday, f
 
     result['%'] = (result['Count'] / total_days)
 
-    result.columns = [output_header, 'Service', 'Count', '%']
+    result.columns = [output_header, 'Service', 'Responsable', 'Poste', 'Count', '%']
     return result
 
 def process_daily_analysis(input_dir, output_dir):
@@ -449,8 +449,10 @@ def process_daily_analysis(input_dir, output_dir):
         print("Toutes les données filtrées.")
         return None
 
-    # --- ENRICHISSEMENT : SERVICE PAR EMPLOYÉ ---
-    df['service'] = df['name'].apply(employees_db.lookup_service)
+    # --- ENRICHISSEMENT : SERVICE, RESPONSABLE, POSTE PAR EMPLOYÉ ---
+    df['service']     = df['name'].apply(employees_db.lookup_service)
+    df['responsable'] = df['name'].apply(employees_db.lookup_responsable)
+    df['poste']       = df['name'].apply(employees_db.lookup_poste)
 
     # --- DÉTECTION CHRONOLOGIQUE AMÉLIORÉE ---
     if 'day_numeric' in df.columns and not df.empty:

@@ -764,8 +764,10 @@ def process_monthly_analysis(input_dir, output_dir):
             'IS HALF DAY': 'HALF DAYS'
         }, inplace=True)
 
-        # Add service column from employee database
-        report['Service'] = report['Employee name'].apply(employees_db.lookup_service)
+        # Add service, responsable, poste columns from employee database
+        report['Service']     = report['Employee name'].apply(employees_db.lookup_service)
+        report['Responsable'] = report['Employee name'].apply(employees_db.lookup_responsable)
+        report['Poste']       = report['Employee name'].apply(employees_db.lookup_poste)
 
         # Rename UNDER 8H based on table type
         if is_ramadan_table:
@@ -809,6 +811,8 @@ def process_monthly_analysis(input_dir, output_dir):
         final_cols = [
             'Employee name',
             'Service',
+            'Responsable',
+            'Poste',
             'real working days',
             'days worked',
             'ABSENCE',
@@ -866,7 +870,7 @@ def process_monthly_analysis(input_dir, output_dir):
             })
             
             current_row = 0
-            num_cols = 16  # 15 data columns (+ 1 for aesthetics in merge_range)
+            num_cols = 18  # 17 data columns (+ 1 for aesthetics in merge_range)
             
             # Write main title
             worksheet.merge_range(0, 0, 0, num_cols - 1, header_text, header_title)
@@ -907,7 +911,7 @@ def process_monthly_analysis(input_dir, output_dir):
                             if value == 0 or value == "00:00": 
                                 value = ""
                         # Determine cell format
-                        if col_name in ('Employee name', 'Service'):
+                        if col_name in ('Employee name', 'Service', 'Responsable', 'Poste'):
                             cell_fmt = text_format
                         else:
                             cell_fmt = body_format
@@ -937,11 +941,15 @@ def process_monthly_analysis(input_dir, output_dir):
             for i in range(num_cols):
                 if i == 0:                      # Employee name
                     worksheet.set_column(i, i, 22)
-                elif i == 1:                    # Service (new)
+                elif i == 1:                    # Service
                     worksheet.set_column(i, i, 15)
-                elif i in range(2, 12):         # Count/numeric columns (shifted by 1)
+                elif i == 2:                    # Responsable
+                    worksheet.set_column(i, i, 18)
+                elif i == 3:                    # Poste
+                    worksheet.set_column(i, i, 18)
+                elif i in range(4, 14):         # Count/numeric columns
                     worksheet.set_column(i, i, 10)
-                elif i in [12, 13, 14]:         # Time/Hour columns (shifted by 1)
+                elif i in [14, 15, 16]:         # Time/Hour columns
                     worksheet.set_column(i, i, 14)
                 else:
                     worksheet.set_column(i, i, 12)

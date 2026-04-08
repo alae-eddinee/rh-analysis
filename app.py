@@ -194,7 +194,7 @@ with tab_bureau:
             st.header("📂 Résultats Analyse Bureau")
 
             if graph_output and os.path.exists(graph_output):
-                st.image(graph_output, caption="Graphique des Retards (>10h)", use_container_width=True)
+                st.image(graph_output, caption="Graphique des Retards (>10h)", width='stretch')
                 with open(graph_output, "rb") as file:
                     st.download_button(
                         label="⬇️ Télécharger le Graphique (PNG)",
@@ -421,7 +421,7 @@ with tab_employees:
     edited_df = st.data_editor(
         df_emp,
         num_rows="fixed",
-        use_container_width=True,
+        width='stretch',
         column_config={
             "matricule":   st.column_config.TextColumn("Matricule",      width="small"),
             "nom":         st.column_config.TextColumn("Nom",            width="medium"),
@@ -512,7 +512,7 @@ with tab_employees:
         )
         df_inactive = pd.DataFrame(inactive)[['matricule', 'nom', 'prenom', 'service', 'last_seen', 'days_inactive']]
         df_inactive.columns = ['Matricule', 'Nom', 'Prénom', 'Service', 'Dernier scan', 'Jours inactif']
-        st.dataframe(df_inactive, use_container_width=True, hide_index=True)
+        st.dataframe(df_inactive, width='stretch', hide_index=True)
 
         if st.button("🗑️ Supprimer tous les inactifs", type="secondary", key="remove_inactive"):
             removed = employees_db.remove_inactive()
