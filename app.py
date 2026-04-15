@@ -424,129 +424,59 @@ with tab_annual:
 # --- TAB 4: EMPLOYEE MANAGEMENT (BUREAU ONLY) ---
 with tab_employees:
     st.header("👥 Gestion des Employés Bureau")
-    st.markdown(
-        "Gérez la liste des employés bureau et leurs services. "
-        "Ces informations enrichissent les rapports **Bureau** avec les colonnes **Service**, **Responsable** et **Poste**."
-    )
 
     employees = employees_db.load_employees()
 
-    # ── Section 1: current list (editable + per-row delete) ──────────────────
-    st.subheader("📋 Liste actuelle")
-    st.info(f"**{len(employees)}** employé(s) dans la base de données.")
+    COLS = ['matricule', 'nom', 'prenom', 'service', 'poste', 'responsable']
 
     if employees:
         df_emp = pd.DataFrame(employees)
     else:
-        df_emp = pd.DataFrame(columns=['matricule', 'nom', 'prenom', 'service', 'poste', 'responsable', 'last_seen'])
+        df_emp = pd.DataFrame(columns=COLS)
 
-    display_cols = ['matricule', 'nom', 'prenom', 'service', 'poste', 'responsable', 'last_seen']
-    for col in display_cols:
+    for col in COLS:
         if col not in df_emp.columns:
             df_emp[col] = ''
-    df_emp = df_emp[display_cols]
-
-    st.caption("Double-cliquez une cellule pour modifier, puis cliquez **Sauvegarder**. Utilisez le bouton 🗑️ pour supprimer un employé individuellement.")
+    df_emp = df_emp[COLS]
 
     edited_df = st.data_editor(
         df_emp,
-        num_rows="fixed",
-        width='stretch',
+        num_rows="dynamic",
+        use_container_width=True,
         column_config={
-            "matricule":   st.column_config.TextColumn("Matricule",      width="small"),
-            "nom":         st.column_config.TextColumn("Nom",            width="medium"),
-            "prenom":      st.column_config.TextColumn("Prénom",         width="medium"),
-            "service":     st.column_config.TextColumn("Service",        width="medium"),
-            "poste":       st.column_config.TextColumn("Poste",          width="medium"),
-            "responsable": st.column_config.TextColumn("Responsable",    width="medium"),
-            "last_seen":   st.column_config.TextColumn("Dernier scan",   width="small", disabled=True),
+            "matricule":   st.column_config.TextColumn("Matricule",   width="small"),
+            "nom":         st.column_config.TextColumn("Nom",         width="medium"),
+            "prenom":      st.column_config.TextColumn("Prénom",      width="medium"),
+            "service":     st.column_config.TextColumn("Service",     width="medium"),
+            "poste":       st.column_config.TextColumn("Poste",       width="medium"),
+            "responsable": st.column_config.TextColumn("Responsable", width="medium"),
         },
         key="employee_editor"
     )
 
-    if st.button("💾 Sauvegarder les modifications", type="primary", key="save_employees"):
-        records = edited_df.fillna('').to_dict('records')
-        records = [r for r in records if str(r.get('nom', '')).strip()]
+    if st.button("💾 Sauvegarder", type="primary", key="save_employees"):
+        # Preserve existing records' ids and last_seen so Supabase upsert works correctly
+        existing_by_id = {e.get('id'): e for e in employees if e.get('id')}
+        records = []
+        for i, row in edited_df.fillna('').iterrows():
+            if not str(row.get('nom', '')).strip():
+                continue
+            # Try to match back to an existing record by position to keep its id/last_seen
+            original = employees[i] if i < len(employees) else {}
+            record = {
+                'matricule':   str(row.get('matricule',   '')).strip(),
+                'nom':         str(row.get('nom',         '')).strip().upper(),
+                'prenom':      str(row.get('prenom',      '')).strip().upper(),
+                'service':     str(row.get('service',     '')).strip().lower(),
+                'poste':       str(row.get('poste',       '')).strip(),
+                'responsable': str(row.get('responsable', '')).strip(),
+                'last_seen':   original.get('last_seen'),
+            }
+            if original.get('id'):
+                record['id'] = original['id']
+            records.append(record)
         employees_db.save_employees(records)
         st.success(f"✅ {len(records)} employés sauvegardés.")
         st.rerun()
-
-    st.divider()
-
-    # ── Section 2: individual remove ─────────────────────────────────────────
-    st.subheader("🗑️ Supprimer un employé")
-    if employees:
-        emp_options = {
-            f"{e.get('nom', '')} {e.get('prenom', '')} ({e.get('matricule', '') or 'sans mat.'})": i
-            for i, e in enumerate(employees)
-        }
-        selected_label = st.selectbox("Sélectionner l'employé à supprimer", list(emp_options.keys()), key="del_select")
-        if st.button("🗑️ Supprimer cet employé", type="secondary", key="del_single"):
-            idx = emp_options[selected_label]
-            removed_name = selected_label
-            current = employees_db.load_employees()
-            del current[idx]
-            employees_db.save_employees(current)
-            st.success(f"✅ **{removed_name}** supprimé.")
-            st.rerun()
-    else:
-        st.info("Aucun employé dans la base de données.")
-
-    st.divider()
-
-    # ── Section 3: add a new employee ────────────────────────────────────────
-    st.subheader("➕ Ajouter un employé")
-    with st.form("add_employee_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        new_matricule  = c1.text_input("Matricule")
-        new_nom        = c2.text_input("Nom *")
-        new_prenom     = c3.text_input("Prénom")
-        c4, c5, c6 = st.columns(3)
-        new_service    = c4.text_input("Service *")
-        new_poste      = c5.text_input("Poste")
-        new_responsable = c6.text_input("Responsable")
-        submitted = st.form_submit_button("Ajouter", type="primary")
-
-    if submitted:
-        if not new_nom.strip():
-            st.error("Le champ **Nom** est obligatoire.")
-        elif not new_service.strip():
-            st.error("Le champ **Service** est obligatoire.")
-        else:
-            current = employees_db.load_employees()
-            current.append({
-                'matricule':    new_matricule.strip(),
-                'nom':          new_nom.strip().upper(),
-                'prenom':       new_prenom.strip().upper(),
-                'responsable':  new_responsable.strip(),
-                'service':      new_service.strip().lower(),
-                'poste':        new_poste.strip(),
-                'last_seen':    None,
-            })
-            employees_db.save_employees(current)
-            st.success(f"✅ **{new_nom.upper()}** ajouté avec succès.")
-            st.rerun()
-
-    st.divider()
-
-    # ── Section 4: inactive employees (>30 days without scan) ────────────────
-    st.subheader("⚠️ Employés inactifs (> 30 jours sans scan)")
-    inactive = employees_db.get_inactive()
-
-    if not inactive:
-        st.success("Aucun employé inactif détecté.")
-    else:
-        st.warning(
-            f"**{len(inactive)}** employé(s) n'ont pas de scan depuis plus de 30 jours. "
-            "Ils sont peut-être partis ou ont arrêté de pointer."
-        )
-        df_inactive = pd.DataFrame(inactive)[['matricule', 'nom', 'prenom', 'service', 'last_seen', 'days_inactive']]
-        df_inactive.columns = ['Matricule', 'Nom', 'Prénom', 'Service', 'Dernier scan', 'Jours inactif']
-        st.dataframe(df_inactive, width='stretch', hide_index=True)
-
-        if st.button("🗑️ Supprimer tous les inactifs", type="secondary", key="remove_inactive"):
-            removed = employees_db.remove_inactive()
-            st.success(f"✅ {removed} employé(s) supprimé(s) de la base de données.")
-            st.rerun()
 
 st.sidebar.info("Application RH - Analyse Bureau & Production")
