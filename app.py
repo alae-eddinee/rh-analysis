@@ -427,56 +427,64 @@ with tab_employees:
 
     employees = employees_db.load_employees()
 
-    COLS = ['matricule', 'nom', 'prenom', 'service', 'poste', 'responsable']
+    # Include id and last_seen as hidden disabled columns so they travel with each row
+    DISPLAY_COLS = ['matricule', 'nom', 'prenom', 'service', 'poste', 'responsable']
+    ALL_COLS = ['_id', '_last_seen'] + DISPLAY_COLS
 
-    if employees:
-        df_emp = pd.DataFrame(employees)
-    else:
-        df_emp = pd.DataFrame(columns=COLS)
-
-    for col in COLS:
-        if col not in df_emp.columns:
-            df_emp[col] = ''
-    df_emp = df_emp[COLS]
+    rows = []
+    for e in employees:
+        rows.append({
+            '_id':        e.get('id', ''),
+            '_last_seen': e.get('last_seen', ''),
+            'matricule':  e.get('matricule', ''),
+            'nom':        e.get('nom', ''),
+            'prenom':     e.get('prenom', ''),
+            'service':    e.get('service', ''),
+            'poste':      e.get('poste', ''),
+            'responsable': e.get('responsable', ''),
+        })
+    df_emp = pd.DataFrame(rows, columns=ALL_COLS) if rows else pd.DataFrame(columns=ALL_COLS)
 
     edited_df = st.data_editor(
         df_emp,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "matricule":   st.column_config.TextColumn("Matricule",   width="small"),
-            "nom":         st.column_config.TextColumn("Nom",         width="medium"),
-            "prenom":      st.column_config.TextColumn("Prénom",      width="medium"),
-            "service":     st.column_config.TextColumn("Service",     width="medium"),
-            "poste":       st.column_config.TextColumn("Poste",       width="medium"),
-            "responsable": st.column_config.TextColumn("Responsable", width="medium"),
+            "_id":         st.column_config.TextColumn(disabled=True,  width="small",  label="id"),
+            "_last_seen":  st.column_config.TextColumn(disabled=True,  width="small",  label="Dernier scan"),
+            "matricule":   st.column_config.TextColumn("Matricule",    width="small"),
+            "nom":         st.column_config.TextColumn("Nom",          width="medium"),
+            "prenom":      st.column_config.TextColumn("Prénom",       width="medium"),
+            "service":     st.column_config.TextColumn("Service",      width="medium"),
+            "poste":       st.column_config.TextColumn("Poste",        width="medium"),
+            "responsable": st.column_config.TextColumn("Responsable",  width="medium"),
         },
         key="employee_editor"
     )
 
     if st.button("💾 Sauvegarder", type="primary", key="save_employees"):
-        # Preserve existing records' ids and last_seen so Supabase upsert works correctly
-        existing_by_id = {e.get('id'): e for e in employees if e.get('id')}
-        records = []
-        for i, row in edited_df.fillna('').iterrows():
-            if not str(row.get('nom', '')).strip():
-                continue
-            # Try to match back to an existing record by position to keep its id/last_seen
-            original = employees[i] if i < len(employees) else {}
-            record = {
-                'matricule':   str(row.get('matricule',   '')).strip(),
-                'nom':         str(row.get('nom',         '')).strip().upper(),
-                'prenom':      str(row.get('prenom',      '')).strip().upper(),
-                'service':     str(row.get('service',     '')).strip().lower(),
-                'poste':       str(row.get('poste',       '')).strip(),
-                'responsable': str(row.get('responsable', '')).strip(),
-                'last_seen':   original.get('last_seen'),
-            }
-            if original.get('id'):
-                record['id'] = original['id']
-            records.append(record)
-        employees_db.save_employees(records)
-        st.success(f"✅ {len(records)} employés sauvegardés.")
-        st.rerun()
+        try:
+            records = []
+            for _, row in edited_df.fillna('').iterrows():
+                if not str(row.get('nom', '')).strip():
+                    continue
+                record = {
+                    'matricule':   str(row.get('matricule',   '')).strip(),
+                    'nom':         str(row.get('nom',         '')).strip().upper(),
+                    'prenom':      str(row.get('prenom',      '')).strip().upper(),
+                    'service':     str(row.get('service',     '')).strip().lower(),
+                    'poste':       str(row.get('poste',       '')).strip(),
+                    'responsable': str(row.get('responsable', '')).strip(),
+                    'last_seen':   row.get('_last_seen') or None,
+                }
+                emp_id = str(row.get('_id', '')).strip()
+                if emp_id:
+                    record['id'] = emp_id
+                records.append(record)
+            employees_db.save_employees(records)
+            st.success(f"✅ {len(records)} employés sauvegardés.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erreur lors de la sauvegarde : {e}")
 
 st.sidebar.info("Application RH - Analyse Bureau & Production")
