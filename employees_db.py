@@ -135,38 +135,36 @@ def save_employees(employees: list) -> None:
         return
     
     try:
-        # Get current employees to determine what to add/update/delete
-        current = load_employees()
-        current_ids = {e.get('id') for e in current if e.get('id')}
+        # Snapshot current ids before any writes
+        current_ids = {e.get('id') for e in load_employees() if e.get('id')}
         new_ids = {e.get('id') for e in employees if e.get('id')}
-        
+
         # Delete removed employees
         to_delete = current_ids - new_ids
         for emp_id in to_delete:
             client.table(TABLE_NAME).delete().eq('id', emp_id).execute()
-        
+
         # Upsert (insert or update) employees
         for emp in employees:
-            # Clean the employee data
             record = {
-                'matricule': str(emp.get('matricule', '') or '').strip(),
-                'nom': str(emp.get('nom', '') or '').strip().upper(),
-                'prenom': str(emp.get('prenom', '') or '').strip().upper(),
+                'matricule':   str(emp.get('matricule',   '') or '').strip(),
+                'nom':         str(emp.get('nom',         '') or '').strip().upper(),
+                'prenom':      str(emp.get('prenom',      '') or '').strip().upper(),
                 'responsable': str(emp.get('responsable', '') or '').strip(),
-                'service': str(emp.get('service', '') or '').strip().lower(),
-                'poste': str(emp.get('poste', '') or '').strip(),
-                'last_seen': emp.get('last_seen'),
+                'service':     str(emp.get('service',     '') or '').strip().lower(),
+                'poste':       str(emp.get('poste',       '') or '').strip(),
+                'last_seen':   emp.get('last_seen'),
             }
-            
             emp_id = emp.get('id')
             if emp_id:
-                # Update existing
                 client.table(TABLE_NAME).update(record).eq('id', emp_id).execute()
             else:
-                # Insert new
                 client.table(TABLE_NAME).insert(record).execute()
     except Exception as e:
         raise RuntimeError(f"Supabase save failed: {e}") from e
+    finally:
+        # Always clear the cache after a save attempt so the next read is fresh
+        _invalidate_cache()
 
 
 def _save_to_local_fallback(employees: list) -> None:
