@@ -166,8 +166,7 @@ def save_employees(employees: list) -> None:
                 # Insert new
                 client.table(TABLE_NAME).insert(record).execute()
     except Exception as e:
-        print(f"Warning: Could not save employees to Supabase: {e}")
-        _save_to_local_fallback(employees)
+        raise RuntimeError(f"Supabase save failed: {e}") from e
 
 
 def _save_to_local_fallback(employees: list) -> None:
