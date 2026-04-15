@@ -30,6 +30,16 @@ _supabase_client: Client = None
 # Table name in Supabase
 TABLE_NAME = "employees"
 
+# In-memory caches — invalidated whenever employees are saved
+_employees_cache: list | None = None
+_field_maps_cache: dict = {}
+
+
+def _invalidate_cache():
+    global _employees_cache, _field_maps_cache
+    _employees_cache = None
+    _field_maps_cache = {}
+
 
 def _get_supabase_client() -> Client:
     """Get or create Supabase client."""
@@ -74,26 +84,32 @@ def _clean(name: str) -> str:
 
 def load_employees() -> list:
     """Return the full employee list from Supabase. Auto-initializes from Excel if table is empty."""
+    global _employees_cache
+    if _employees_cache is not None:
+        return _employees_cache
+
     client = _get_supabase_client()
-    
+
     if client is None:
-        # Fallback: try local JSON if Supabase is not available
-        return _load_from_local_fallback()
-    
+        _employees_cache = _load_from_local_fallback()
+        return _employees_cache
+
     try:
         response = client.table(TABLE_NAME).select("*").execute()
         employees = response.data if response.data else []
-        
+
         # Auto-initialize from Excel if empty
         if not employees and os.path.exists(EXCEL_PATH):
             _init_from_excel_to_supabase()
             response = client.table(TABLE_NAME).select("*").execute()
             employees = response.data if response.data else []
-        
-        return employees
+
+        _employees_cache = employees
+        return _employees_cache
     except Exception as e:
         print(f"Warning: Could not load employees from Supabase: {e}")
-        return _load_from_local_fallback()
+        _employees_cache = _load_from_local_fallback()
+        return _employees_cache
 
 
 def _load_from_local_fallback() -> list:
@@ -110,6 +126,7 @@ def _load_from_local_fallback() -> list:
 
 def save_employees(employees: list) -> None:
     """Persist the employee list to Supabase."""
+    _invalidate_cache()
     client = _get_supabase_client()
     
     if client is None:
@@ -350,6 +367,9 @@ def _build_field_map(field: str) -> dict:
       - 'PRENOM NOM'  (reversed, for flexible matching)
       - 'NOM'         (last-name-only fallback – added only if not already present)
     """
+    if field in _field_maps_cache:
+        return _field_maps_cache[field]
+
     field_map: dict = {}
     for emp in load_employees():
         nom    = _clean(emp.get('nom', ''))
@@ -364,6 +384,8 @@ def _build_field_map(field: str) -> dict:
             field_map[f"{prenom} {nom}"] = value
         if nom not in field_map:
             field_map[nom] = value
+
+    _field_maps_cache[field] = field_map
     return field_map
 
 
