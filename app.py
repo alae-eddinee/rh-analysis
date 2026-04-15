@@ -63,21 +63,19 @@ def load_module_from_path(module_name, file_path):
     spec.loader.exec_module(module)
     return module
 
-# Load Bureau analysis scripts (8h/day - standard office workers)
-daily_script = load_module_from_path("bureau_daily_analysis", os.path.join(BASE_DIR, "analysis_bureau_daily.py"))
-monthly_script = load_module_from_path("bureau_monthly_analysis", os.path.join(BASE_DIR, "analysis_bureau_monthly.py"))
-graph_script = load_module_from_path("late_arrivals_graph", os.path.join(BASE_DIR, "late_arrivals_graph.py"))
+@st.cache_resource
+def load_all_modules():
+    daily = load_module_from_path("bureau_daily_analysis", os.path.join(BASE_DIR, "analysis_bureau_daily.py"))
+    monthly = load_module_from_path("bureau_monthly_analysis", os.path.join(BASE_DIR, "analysis_bureau_monthly.py"))
+    graph = load_module_from_path("late_arrivals_graph", os.path.join(BASE_DIR, "late_arrivals_graph.py"))
+    prod_daily = load_module_from_path("production_daily_analysis", os.path.join(BASE_DIR, "analysis_production_daily.py"))
+    prod_monthly = load_module_from_path("production_monthly_analysis", os.path.join(BASE_DIR, "analysis_production_monthly.py"))
+    annual_pivot = load_module_from_path("pointage_pivot_v2", os.path.join(BASE_DIR, "pointage_pivot_V2.py"))
+    emp_db = load_module_from_path("employees_db", os.path.join(BASE_DIR, "employees_db.py"))
+    emp_db.load_employees()  # triggers auto-init from Excel if DB is absent
+    return daily, monthly, graph, prod_daily, prod_monthly, annual_pivot, emp_db
 
-# Load Production analysis scripts (9h/day - workers with codes 130, 131, 140, 141)
-prod_daily_script = load_module_from_path("production_daily_analysis", os.path.join(BASE_DIR, "analysis_production_daily.py"))
-prod_monthly_script = load_module_from_path("production_monthly_analysis", os.path.join(BASE_DIR, "analysis_production_monthly.py"))
-
-# Load Annual Pivot analysis script (V2 with correct calculations)
-annual_pivot_script = load_module_from_path("pointage_pivot_v2", os.path.join(BASE_DIR, "pointage_pivot_V2.py"))
-
-# Load employee database module and ensure it is initialized
-employees_db = load_module_from_path("employees_db", os.path.join(BASE_DIR, "employees_db.py"))
-employees_db.load_employees()  # triggers auto-init from Excel if DB is absent
+daily_script, monthly_script, graph_script, prod_daily_script, prod_monthly_script, annual_pivot_script, employees_db = load_all_modules()
 
 # --- UTILS ---
 def reset_dirs():
@@ -98,6 +96,11 @@ st.markdown("""
 Cette application permet d'automatiser l'analyse des pointages.
 Sélectionnez le type d'analyse, téléversez vos fichiers Excel et générez les rapports.
 """)
+
+# Persist output paths across reruns so download buttons survive after clicking them
+for key in ("bureau_outputs", "production_outputs", "annual_outputs"):
+    if key not in st.session_state:
+        st.session_state[key] = []
 
 # Create tabs for different analysis types
 tab_bureau, tab_production, tab_annual, tab_employees = st.tabs([
@@ -130,6 +133,7 @@ with tab_bureau:
 
             status_text.text("Préparation de l'environnement...")
             reset_dirs()
+            st.session_state["bureau_outputs"] = []
             progress_bar.progress(10)
 
             status_text.text(f"Sauvegarde de {len(uploaded_files_regular)} fichiers...")
@@ -140,6 +144,7 @@ with tab_bureau:
             progress_bar.progress(30)
 
             status_text.text("Exécution de l'analyse quotidienne...")
+            daily_output = None
             try:
                 daily_output = daily_script.process_daily_analysis(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
                 if daily_output:
@@ -151,6 +156,7 @@ with tab_bureau:
             progress_bar.progress(50)
 
             status_text.text("Exécution de l'analyse mensuelle...")
+            monthly_output = None
             try:
                 monthly_output = monthly_script.process_monthly_analysis(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
                 if monthly_output:
@@ -189,37 +195,45 @@ with tab_bureau:
 
             status_text.text("Finalisation...")
             progress_bar.progress(100)
-            
-            st.divider()
-            st.header("📂 Résultats Analyse Bureau")
 
+            # Store output paths in session state so downloads persist across reruns
+            outputs = []
             if graph_output and os.path.exists(graph_output):
-                st.image(graph_output, caption="Graphique des Retards (>10h)", width='stretch')
-                with open(graph_output, "rb") as file:
-                    st.download_button(
-                        label="⬇️ Télécharger le Graphique (PNG)",
-                        data=file,
-                        file_name=os.path.basename(graph_output),
-                        mime="image/png"
-                    )
-
-            st.subheader("Rapports Excel")
-            files_found = False
+                outputs.append(("graph", graph_output))
             if os.path.exists(TEMP_OUTPUT_DIR):
                 for f in os.listdir(TEMP_OUTPUT_DIR):
                     if f.endswith(".xlsx") and not f.startswith("~$") and "Production" not in f:
-                        files_found = True
-                        file_path = os.path.join(TEMP_OUTPUT_DIR, f)
-                        with open(file_path, "rb") as file:
-                            st.download_button(
-                                label=f"⬇️ Télécharger {f}",
-                                data=file,
-                                file_name=f,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-            
-            if not files_found:
-                st.info("Aucun rapport Excel trouvé dans le dossier de sortie.")
+                        outputs.append(("xlsx", os.path.join(TEMP_OUTPUT_DIR, f)))
+            st.session_state["bureau_outputs"] = outputs
+
+    # Results section — rendered every rerun as long as session state has outputs
+    if st.session_state["bureau_outputs"]:
+        st.divider()
+        st.header("📂 Résultats Analyse Bureau")
+
+        for kind, path in st.session_state["bureau_outputs"]:
+            if not os.path.exists(path):
+                continue
+            if kind == "graph":
+                st.image(path, caption="Graphique des Retards (>10h)", width='stretch')
+                with open(path, "rb") as file:
+                    st.download_button(
+                        label="⬇️ Télécharger le Graphique (PNG)",
+                        data=file,
+                        file_name=os.path.basename(path),
+                        mime="image/png",
+                        key=f"dl_bureau_graph_{os.path.basename(path)}"
+                    )
+            elif kind == "xlsx":
+                fname = os.path.basename(path)
+                with open(path, "rb") as file:
+                    st.download_button(
+                        label=f"⬇️ Télécharger {fname}",
+                        data=file,
+                        file_name=fname,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_bureau_{fname}"
+                    )
 
 # --- TAB 2: PRODUCTION ANALYSIS ---
 with tab_production:
@@ -249,6 +263,7 @@ with tab_production:
 
             status_text.text("Préparation de l'environnement...")
             reset_dirs()
+            st.session_state["production_outputs"] = []
             progress_bar.progress(10)
 
             status_text.text(f"Sauvegarde de {len(uploaded_files_production)} fichiers...")
@@ -259,6 +274,7 @@ with tab_production:
             progress_bar.progress(30)
 
             status_text.text("Exécution de l'analyse quotidienne Production...")
+            prod_daily_output = None
             try:
                 prod_daily_output = prod_daily_script.process_production_daily_analysis(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
                 if prod_daily_output:
@@ -272,6 +288,7 @@ with tab_production:
             progress_bar.progress(60)
 
             status_text.text("Exécution de l'analyse mensuelle Production...")
+            prod_monthly_output = None
             try:
                 prod_monthly_output = prod_monthly_script.process_production_monthly_analysis(TEMP_INPUT_DIR, TEMP_OUTPUT_DIR)
                 if prod_monthly_output:
@@ -296,26 +313,32 @@ with tab_production:
 
             status_text.text("Finalisation...")
             progress_bar.progress(100)
-            
-            st.divider()
-            st.header("📂 Résultats Analyse Production")
 
-            st.subheader("Rapports Excel Production")
-            files_found = False
+            # Store output paths in session state so downloads persist across reruns
+            outputs = []
             if os.path.exists(TEMP_OUTPUT_DIR):
                 for f in os.listdir(TEMP_OUTPUT_DIR):
                     if f.endswith(".xlsx") and not f.startswith("~$") and "production" in f.lower():
-                        files_found = True
-                        file_path = os.path.join(TEMP_OUTPUT_DIR, f)
-                        with open(file_path, "rb") as file:
-                            st.download_button(
-                                label=f"⬇️ Télécharger {f}",
-                                data=file,
-                                file_name=f,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-            if not files_found:
-                st.info("Aucun rapport Excel Production trouvé dans le dossier de sortie.")
+                        outputs.append(os.path.join(TEMP_OUTPUT_DIR, f))
+            st.session_state["production_outputs"] = outputs
+
+    # Results section — rendered every rerun as long as session state has outputs
+    if st.session_state["production_outputs"]:
+        st.divider()
+        st.header("📂 Résultats Analyse Production")
+        st.subheader("Rapports Excel Production")
+        for path in st.session_state["production_outputs"]:
+            if not os.path.exists(path):
+                continue
+            fname = os.path.basename(path)
+            with open(path, "rb") as file:
+                st.download_button(
+                    label=f"⬇️ Télécharger {fname}",
+                    data=file,
+                    file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_prod_{fname}"
+                )
 
 # --- TAB 3: ANNUAL PIVOT ANALYSIS ---
 with tab_annual:
@@ -345,6 +368,7 @@ with tab_annual:
 
             status_text.text("Préparation de l'environnement...")
             reset_dirs()
+            st.session_state["annual_outputs"] = []
             progress_bar.progress(10)
 
             status_text.text(f"Sauvegarde de {len(uploaded_files_annual)} fichiers...")
@@ -370,26 +394,32 @@ with tab_annual:
 
             status_text.text("Finalisation...")
             progress_bar.progress(100)
-            
-            st.divider()
-            st.header("📂 Résultats Analyse Pivot Annuel")
 
-            st.subheader("Rapport Excel Pivot Annuel")
-            files_found = False
+            # Store output paths in session state so downloads persist across reruns
+            outputs = []
             if os.path.exists(TEMP_OUTPUT_DIR):
                 for f in os.listdir(TEMP_OUTPUT_DIR):
                     if f.endswith(".xlsx") and not f.startswith("~$") and ("ANNUAL_PIVOT" in f or "Annual_Pivot" in f):
-                        files_found = True
-                        file_path = os.path.join(TEMP_OUTPUT_DIR, f)
-                        with open(file_path, "rb") as file:
-                            st.download_button(
-                                label=f"⬇️ Télécharger {f}",
-                                data=file,
-                                file_name=f,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-            if not files_found:
-                st.info("Aucun rapport Pivot Annuel trouvé.")
+                        outputs.append(os.path.join(TEMP_OUTPUT_DIR, f))
+            st.session_state["annual_outputs"] = outputs
+
+    # Results section — rendered every rerun as long as session state has outputs
+    if st.session_state["annual_outputs"]:
+        st.divider()
+        st.header("📂 Résultats Analyse Pivot Annuel")
+        st.subheader("Rapport Excel Pivot Annuel")
+        for path in st.session_state["annual_outputs"]:
+            if not os.path.exists(path):
+                continue
+            fname = os.path.basename(path)
+            with open(path, "rb") as file:
+                st.download_button(
+                    label=f"⬇️ Télécharger {fname}",
+                    data=file,
+                    file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_annual_{fname}"
+                )
 
 # --- TAB 4: EMPLOYEE MANAGEMENT (BUREAU ONLY) ---
 with tab_employees:
