@@ -466,7 +466,8 @@ with tab_employees:
         try:
             records = []
             for _, row in edited_df.fillna('').iterrows():
-                if not str(row.get('nom', '')).strip():
+                # Skip completely empty rows (all visible fields blank)
+                if not any(str(row.get(c, '')).strip() for c in ['matricule', 'nom', 'prenom', 'service', 'poste', 'responsable']):
                     continue
                 record = {
                     'matricule':   str(row.get('matricule',   '')).strip(),
