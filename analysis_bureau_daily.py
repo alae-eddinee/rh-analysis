@@ -444,7 +444,21 @@ def process_daily_analysis(input_dir, output_dir):
         initial_len = len(df)
         df = df[~df['name'].isin(excluded_clean)]
         print(f"Supprimé {initial_len - len(df)} enregistrements basés sur la liste d'exclusion de noms.")
-    
+
+    # --- EXCLURE LES EMPLOYÉS INACTIFS (pas de scan depuis +30 jours) ---
+    inactive_variants = employees_db.get_inactive_name_variants()
+    if inactive_variants:
+        before_inactive = len(df)
+        df = df[~df['name'].apply(
+            lambda n: any(
+                clean_name_string(n).startswith(v) or v.startswith(clean_name_string(n))
+                for v in inactive_variants
+            )
+        )]
+        removed_inactive = before_inactive - len(df)
+        if removed_inactive:
+            print(f"Supprimé {removed_inactive} enregistrements d'employés inactifs (>30 jours sans scan).")
+
     if df.empty:
         print("Toutes les données filtrées.")
         return None

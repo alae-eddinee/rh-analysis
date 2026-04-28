@@ -524,6 +524,24 @@ def process_monthly_analysis(input_dir, output_dir):
 
     df = pd.DataFrame(all_data)
 
+    # --- EXCLURE LES EMPLOYÉS INACTIFS (pas de scan depuis +30 jours) ---
+    inactive_variants = employees_db.get_inactive_name_variants()
+    if inactive_variants:
+        before_inactive = len(df)
+        df = df[~df['name'].apply(
+            lambda n: any(
+                n.upper().startswith(v) or v.startswith(n.upper())
+                for v in inactive_variants
+            )
+        )]
+        removed_inactive = before_inactive - len(df)
+        if removed_inactive:
+            print(f"Removed {removed_inactive} records for inactive employees (>30 days without scan).")
+
+    if df.empty:
+        print("No data after inactive employee filter.")
+        return None
+
     # --- DÉTECTION CHRONOLOGIQUE AMÉLIORÉE ---
     if 'day_numeric' in df.columns and not df.empty:
         # 1. Récupérer les infos de base

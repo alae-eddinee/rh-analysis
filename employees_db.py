@@ -331,6 +331,32 @@ def get_inactive(reference_date=None, threshold_days: int = INACTIVE_DAYS) -> li
     return result
 
 
+def get_inactive_name_variants(reference_date=None, threshold_days: int = INACTIVE_DAYS) -> set:
+    """
+    Return a set of cleaned name variants for employees who ARE inactive (last_seen >
+    threshold_days ago).  Use as a blocklist: drop any pointage row whose cleaned name
+    starts with, or is a prefix of, one of these variants.
+
+    Only employees who have been seen at least once can appear here (same rule as
+    get_inactive).  Employees with last_seen=None are never included.
+    """
+    if reference_date is None:
+        reference_date = date.today()
+    elif isinstance(reference_date, datetime):
+        reference_date = reference_date.date()
+
+    variants: set = set()
+    for emp in get_inactive(reference_date, threshold_days):
+        nom    = _clean(emp.get('nom', ''))
+        prenom = _clean(emp.get('prenom', ''))
+        if nom and prenom:
+            variants.add(f"{nom} {prenom}")
+            variants.add(f"{prenom} {nom}")
+        if nom:
+            variants.add(nom)
+    return variants
+
+
 def remove_inactive(reference_date=None, threshold_days: int = INACTIVE_DAYS) -> int:
     """
     Remove employees inactive for more than `threshold_days`.
